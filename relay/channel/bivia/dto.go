@@ -45,6 +45,8 @@ type biviaResponse struct {
 	InputTokens    int                `json:"input_tokens"`
 	ImageTokens    int                `json:"image_tokens"`
 	BillableTokens int                `json:"billable_tokens"`
+	Found          *bool              `json:"found,omitempty"`
+	Confidence     *float64           `json:"confidence,omitempty"`
 }
 
 // biviaDecision is the client-facing JSON envelope returned as the assistant

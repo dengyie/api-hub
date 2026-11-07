@@ -138,11 +138,17 @@ func parseDecisionResponse(resp *http.Response) (*biviaDecisionResult, *types.Ne
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
 	// /extract omits the status field entirely: its per-field verdicts live in
-	// values[].found and the call never abstains as one unit, so synthesize
-	// answered for it.
+	// values[].found or found, so synthesize answered / abstained accordingly.
 	status := fromPtr(decision.Status)
-	if status == "" && decision.Type == "extract" && len(decision.Values) > 0 {
-		status = "answered"
+	if status == "" && decision.Type == "extract" {
+		if decision.Found != nil && !*decision.Found {
+			status = "abstained"
+		} else {
+			status = "answered"
+		}
+	}
+	if decision.Probability == 0 && decision.Confidence != nil {
+		decision.Probability = *decision.Confidence
 	}
 	if status != "answered" && status != "abstained" {
 		return nil, types.NewError(

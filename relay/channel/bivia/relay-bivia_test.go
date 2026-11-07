@@ -156,6 +156,20 @@ func TestParseDecisionResponseUsage(t *testing.T) {
 		assert.Equal(t, 1000, result.usage.TotalTokens)
 	})
 
+	t.Run("extract envelope with single value synthesizes answered and confidence", func(t *testing.T) {
+		resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(
+			`{"type":"extract","field":"person name","grounded":true,"value":"Paris","found":true,"confidence":0.992,"input_tokens":14,"billable_tokens":1000}`,
+		))}
+		result, apiErr := parseDecisionResponse(resp)
+		require.Nil(t, apiErr)
+		assert.Contains(t, result.content, `"status":"answered"`)
+		assert.Contains(t, result.content, `"value":"Paris"`)
+		assert.Contains(t, result.content, `"probability":0.992`)
+		assert.Equal(t, 14, result.usage.PromptTokens)
+		assert.Equal(t, 986, result.usage.CompletionTokens)
+		assert.Equal(t, 1000, result.usage.TotalTokens)
+	})
+
 	t.Run("unexpected status is an upstream error", func(t *testing.T) {
 		resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(
 			`{"type":"boolean","status":"exploded"}`,
