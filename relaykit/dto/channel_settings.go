@@ -48,7 +48,14 @@ type ChannelSettings struct {
 	// markup inside content instead of using the reasoning_content field).
 	// Per-channel opt-in, default off — see ReasoningAsContent for why this
 	// cannot be automatic.
-	ThinkTagToReasoning       bool   `json:"think_tag_to_reasoning,omitempty"`
+	ThinkTagToReasoning bool `json:"think_tag_to_reasoning,omitempty"`
+	// SystemOneFlavor selects the upstream dialect for type-65 jev channels:
+	// "" (default) = native System One passthrough (TypeSafe / FuturePPO /
+	// MindsHub), "bivia" = translate the jev envelope onto Articul8 Bivia's
+	// /v1/systemone (object state serialized into the string Bivia requires;
+	// answers come back in the same Shape-1 format, so clients see one
+	// protocol either way).
+	SystemOneFlavor           string `json:"systemone_flavor,omitempty"`
 	Proxy                     string `json:"proxy"`
 	PassThroughBodyEnabled    bool   `json:"pass_through_body_enabled,omitempty"`
 	ResponsesWebSocketEnabled bool   `json:"responses_websocket_enabled,omitempty"`

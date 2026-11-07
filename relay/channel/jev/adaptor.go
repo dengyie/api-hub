@@ -38,12 +38,20 @@ func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Header, info *com
 	return nil
 }
 
-// ConvertSystemOneRequest is the native path: the client already speaks System
-// One, so the only conversion is model-name mapping (public jev-latest to the
-// upstream's own spelling, e.g. MindsHub's bare "jev" via model_mapping).
+// ConvertSystemOneRequest dispatches on the channel's SystemOneFlavor:
+// "" (native) passes the jev envelope through with only model-name mapping;
+// "bivia" translates onto Articul8 Bivia's /v1/systemone, which speaks the
+// same Shape-1 answers but requires the state as a plain string and takes no
+// model field.
 func (a *Adaptor) ConvertSystemOneRequest(c *gin.Context, info *common.RelayInfo, request *dto.SystemOneRequest) (any, error) {
 	if request == nil {
 		return nil, errors.New("request is nil")
+	}
+	if info.ChannelSetting.SystemOneFlavor == systemOneFlavorBivia {
+		return map[string]any{
+			"state":     biviaStateString(request.State),
+			"questions": request.Questions,
+		}, nil
 	}
 	upstream := *request
 	upstream.Model = info.UpstreamModelName

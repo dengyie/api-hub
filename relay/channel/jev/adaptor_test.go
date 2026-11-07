@@ -84,6 +84,49 @@ func systemOneEnvelope() string {
 	return `{"model":"jev-1.13.0","answers":{"play":{"choice":"all-in","probabilities":{"all-in":0.94}}}}`
 }
 
+func TestConvertSystemOneRequestBiviaFlavor(t *testing.T) {
+	adaptor := &Adaptor{}
+	info := testInfo("jev-latest", relayconstant.RelayModeSystemOne)
+	info.ChannelSetting.SystemOneFlavor = systemOneFlavorBivia
+
+	converted, err := adaptor.ConvertSystemOneRequest(nil, info, &dto.SystemOneRequest{
+		Model:     "jev-latest",
+		State:     json.RawMessage(`{"observation":"ante 4","memory":["x"]}`),
+		Questions: json.RawMessage(`{"play":{"type":"choice"}}`),
+	})
+	require.NoError(t, err)
+	m, ok := converted.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, `{"observation":"ante 4","memory":["x"]}`, m["state"], "object state serializes to compact JSON text")
+	assert.Contains(t, string(m["questions"].(json.RawMessage)), `"play"`)
+	assert.NotContains(t, m, "model", "bivia systemone takes no model field")
+
+	converted, err = adaptor.ConvertSystemOneRequest(nil, info, &dto.SystemOneRequest{
+		Model:     "jev-latest",
+		State:     json.RawMessage(`"plain text state"`),
+		Questions: json.RawMessage(`{}`),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "plain text state", converted.(map[string]any)["state"], "string literal state unwraps to text")
+}
+
+func TestJevSystemOneHandlerUsesUpstreamUsage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/systemone", nil)
+
+	body := `{"model":"dec-1","answers":{"p":{"type":"noul","noul":0.5}},"usage":{"questions":1,"input_tokens":297,"output_tokens":0,"billable_tokens":3000}}`
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}
+	usage, apiErr := (&Adaptor{}).DoResponse(c, resp, testInfo("jev-latest", relayconstant.RelayModeSystemOne))
+	require.Nil(t, apiErr)
+	require.NotNil(t, usage)
+	u := usage.(*dto.Usage)
+	assert.Equal(t, 297, u.PromptTokens)
+	assert.Equal(t, 2703, u.CompletionTokens)
+	assert.Equal(t, 3000, u.TotalTokens)
+}
+
 func TestJevSystemOneHandlerPassesThrough(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
