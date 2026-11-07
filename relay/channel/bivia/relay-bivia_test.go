@@ -83,6 +83,18 @@ func TestConvertBiviaRequest(t *testing.T) {
 		assert.Contains(t, biviaReq.State, "I was double-charged.")
 	})
 
+	t.Run("structured instruction without state preserves preceding system and conversation context", func(t *testing.T) {
+		request := &dto.GeneralOpenAIRequest{}
+		request.Messages = []dto.Message{
+			{Role: "system", Content: "Customer account: VIP tier, location Tokyo."},
+			{Role: "user", Content: `{"question":"Can customer request express refund?","choices":["yes","no"]}`},
+		}
+		biviaReq, err := convertBiviaRequest(testInfo("bivia-choice"), *request)
+		require.NoError(t, err)
+		assert.Equal(t, "Can customer request express refund?", biviaReq.Question)
+		assert.Contains(t, biviaReq.State, "Customer account: VIP tier, location Tokyo.")
+	})
+
 	t.Run("unknown model is rejected", func(t *testing.T) {
 		request := &dto.GeneralOpenAIRequest{}
 		_, err := convertBiviaRequest(testInfo("bivia-ground"), *request)
@@ -164,6 +176,7 @@ func TestParseDecisionResponseUsage(t *testing.T) {
 		require.Nil(t, apiErr)
 		assert.Contains(t, result.content, `"status":"answered"`)
 		assert.Contains(t, result.content, `"value":"Paris"`)
+		assert.Contains(t, result.content, `"found":true`)
 		assert.Contains(t, result.content, `"probability":0.992`)
 		assert.Equal(t, 14, result.usage.PromptTokens)
 		assert.Equal(t, 986, result.usage.CompletionTokens)

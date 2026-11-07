@@ -77,6 +77,17 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *common.RelayInfo, r
 	if lastUser == "" {
 		return nil, errors.New("no user message to probe with")
 	}
+	if info.ChannelSetting.SystemOneFlavor == systemOneFlavorBivia {
+		return map[string]any{
+			"state": lastUser,
+			"questions": map[string]any{
+				"probe": map[string]any{
+					"type":         "noul",
+					"instructions": "Is the statement in the state true?",
+				},
+			},
+		}, nil
+	}
 	return map[string]any{
 		"model": info.UpstreamModelName,
 		"state": map[string]any{"observation": lastUser},

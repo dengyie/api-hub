@@ -76,6 +76,15 @@ func TestConvertOpenAIRequestProbe(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "noul", probe["type"])
 
+	biviaInfo := testInfo("jev-latest", 0)
+	biviaInfo.ChannelSetting.SystemOneFlavor = systemOneFlavorBivia
+	biviaConverted, err := (&Adaptor{}).ConvertOpenAIRequest(nil, biviaInfo, request)
+	require.NoError(t, err)
+	bm, ok := biviaConverted.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "ante 4 with 3 jokers", bm["state"], "bivia probe requires state as plain string")
+	assert.NotContains(t, bm, "model", "bivia probe takes no model field")
+
 	_, err = (&Adaptor{}).ConvertOpenAIRequest(nil, testInfo("jev-latest", 0), &dto.GeneralOpenAIRequest{})
 	require.Error(t, err, "no user message must fail the probe")
 }

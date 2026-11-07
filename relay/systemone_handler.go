@@ -94,14 +94,14 @@ func SystemOneHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 	}
 
 	statusCodeMappingStr := c.GetString("status_code_mapping")
-	var httpResp *http.Response
-	if resp != nil {
-		httpResp = resp.(*http.Response)
-		if httpResp.StatusCode != http.StatusOK {
-			newAPIError = service.RelayErrorHandler(c.Request.Context(), httpResp, false)
-			service.ResetStatusCode(newAPIError, statusCodeMappingStr)
-			return newAPIError
-		}
+	if resp == nil {
+		return types.NewOpenAIError(fmt.Errorf("upstream response is nil"), types.ErrorCodeDoRequestFailed, http.StatusBadGateway)
+	}
+	httpResp := resp.(*http.Response)
+	if httpResp.StatusCode != http.StatusOK {
+		newAPIError = service.RelayErrorHandler(c.Request.Context(), httpResp, false)
+		service.ResetStatusCode(newAPIError, statusCodeMappingStr)
+		return newAPIError
 	}
 
 	usage, newAPIError := adaptor.DoResponse(c, httpResp, info)
@@ -110,6 +110,10 @@ func SystemOneHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		service.ResetStatusCode(newAPIError, statusCodeMappingStr)
 		return newAPIError
 	}
-	service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
+	if usage != nil {
+		if u, ok := usage.(*dto.Usage); ok {
+			service.PostTextConsumeQuota(c, info, u, nil)
+		}
+	}
 	return nil
 }

@@ -89,6 +89,9 @@ func convertBiviaRequest(info *relaycommon.RelayInfo, request dto.GeneralOpenAIR
 		biviaReq.Question = lastUser
 		biviaReq.State = strings.Join(contextParts, "\n\n")
 	}
+	if biviaReq.State == "" && len(contextParts) > 0 {
+		biviaReq.State = strings.Join(contextParts, "\n\n")
+	}
 	if biviaReq.State == "" {
 		biviaReq.State = biviaReq.Question
 	}
@@ -176,6 +179,7 @@ func parseDecisionResponse(resp *http.Response) (*biviaDecisionResult, *types.Ne
 		Policy:        decision.Policy,
 		LatencyMs:     decision.LatencyMs,
 		Evidence:      decision.Evidence,
+		Found:         decision.Found,
 	})
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)

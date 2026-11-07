@@ -63,4 +63,5 @@ type biviaDecision struct {
 	Policy        string             `json:"policy,omitempty"`
 	LatencyMs     float64            `json:"latency_ms,omitempty"`
 	Evidence      json.RawMessage    `json:"evidence,omitempty"`
+	Found         *bool              `json:"found,omitempty"`
 }
