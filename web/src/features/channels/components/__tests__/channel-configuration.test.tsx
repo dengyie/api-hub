@@ -1655,9 +1655,6 @@ test('ordinary edits discover models with saved settings and keep removed draft 
   fireEvent.change(screen.getByDisplayValue('https://saved.example'), {
     target: { value: 'https://draft.example' },
   })
-  fireEvent.change(screen.getByLabelText('API Key *'), {
-    target: { value: 'new-key' },
-  })
   await user.click(screen.getByRole('button', { name: 'Fetch from Upstream' }))
   await user.click(
     await screen.findByRole('checkbox', { name: 'upstream-model' })
@@ -1892,7 +1889,7 @@ test('model configuration is available for a plugin channel without upstream dis
   expect(trigger).toBeDisabled()
 })
 
-test('advanced custom edits preview draft connection settings with the saved key', async () => {
+test('advanced custom edits preview draft connection settings with the draft key', async () => {
   editingChannel = {
     ...editingChannel,
     type: 58,
@@ -1930,7 +1927,37 @@ test('advanced custom edits preview draft connection settings with the saved key
       type: 58,
       channel_id: 42,
       base_url: 'https://draft.example',
-      key: undefined,
+      key: 'unsaved-key',
+    }),
+    expect.anything()
+  )
+  expect(api.get).not.toHaveBeenCalledWith(
+    '/api/channel/fetch_models/42',
+    expect.anything()
+  )
+})
+
+test('ordinary edits preview models with the newly typed key instead of the saved one', async () => {
+  const post = vi
+    .spyOn(api, 'post')
+    .mockResolvedValue({ data: { success: true, data: ['preview-model'] } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  fireEvent.change(screen.getByLabelText('API Key *'), {
+    target: { value: 'draft-key' },
+  })
+  await user.click(screen.getByRole('button', { name: 'Fetch from Upstream' }))
+  expect(
+    await screen.findByRole('checkbox', { name: 'preview-model' })
+  ).toBeVisible()
+  expect(post).toHaveBeenCalledWith(
+    '/api/channel/fetch_models',
+    expect.objectContaining({
+      type: 1,
+      channel_id: 42,
+      base_url: 'https://saved.example',
+      key: 'draft-key',
     }),
     expect.anything()
   )

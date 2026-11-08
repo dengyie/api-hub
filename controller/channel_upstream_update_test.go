@@ -241,9 +241,9 @@ func TestFetchModelsAdvancedCustomCreatePreview(t *testing.T) {
 	require.Equal(t, "Bearer create-preview-key", <-receivedAuthorization)
 }
 
-func TestFetchModelsAdvancedCustomEditPreviewUsesSavedKeyAndExplicitClears(t *testing.T) {
+func TestFetchModelsAdvancedCustomEditPreviewUsesDraftKeyAndExplicitClears(t *testing.T) {
 	db := setupModelListControllerTestDB(t)
-	receivedHeaders := make(chan http.Header, 1)
+	receivedHeaders := make(chan http.Header, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedHeaders <- r.Header.Clone()
 		_, _ = w.Write([]byte(`{"data":[{"id":"edited-preview-model"}]}`))
@@ -281,15 +281,6 @@ func TestFetchModelsAdvancedCustomEditPreviewUsesSavedKeyAndExplicitClears(t *te
 	rawConfig := string(configBytes)
 	baseURL := server.URL
 	explicitEmpty := ""
-	req := fetchModelsRequest{
-		ChannelID:      savedChannel.Id,
-		BaseURL:        &baseURL,
-		Type:           constant.ChannelTypeAdvancedCustom,
-		Key:            "request-key-must-be-ignored",
-		AdvancedCustom: &rawConfig,
-		HeaderOverride: &explicitEmpty,
-		Proxy:          &explicitEmpty,
-	}
 	cleared, err := buildAdvancedCustomModelPreviewChannel(fetchModelsRequest{
 		ChannelID:      savedChannel.Id,
 		BaseURL:        &explicitEmpty,
@@ -304,7 +295,19 @@ func TestFetchModelsAdvancedCustomEditPreviewUsesSavedKeyAndExplicitClears(t *te
 	require.Empty(t, *cleared.HeaderOverride)
 	require.Empty(t, cleared.GetSetting().Proxy)
 
-	body, err := common.Marshal(req)
+	// The key typed in the edit form is the credential the operator is about
+	// to save: the preview must authenticate with it instead of the stale
+	// saved key.
+	draftRequest := fetchModelsRequest{
+		ChannelID:      savedChannel.Id,
+		BaseURL:        &baseURL,
+		Type:           constant.ChannelTypeAdvancedCustom,
+		Key:            "draft-preview-key",
+		AdvancedCustom: &rawConfig,
+		HeaderOverride: &explicitEmpty,
+		Proxy:          &explicitEmpty,
+	}
+	body, err := common.Marshal(draftRequest)
 	require.NoError(t, err)
 
 	recorder := httptest.NewRecorder()
@@ -321,12 +324,131 @@ func TestFetchModelsAdvancedCustomEditPreviewUsesSavedKeyAndExplicitClears(t *te
 	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
 	require.True(t, response.Success, response.Message)
 	require.Equal(t, []string{"edited-preview-model"}, response.Data)
-	require.NotContains(t, recorder.Body.String(), "enabled-saved-key")
-	require.NotContains(t, recorder.Body.String(), "request-key-must-be-ignored")
+	require.NotContains(t, recorder.Body.String(), "draft-preview-key")
 
 	headers := <-receivedHeaders
-	require.Equal(t, "Bearer enabled-saved-key", headers.Get("Authorization"))
+	require.Equal(t, "Bearer draft-preview-key", headers.Get("Authorization"))
 	require.Empty(t, headers.Get("X-Saved"))
+
+	// The draft credential is not committed: the saved row keeps its key,
+	// its multi-key state and its per-key status list.
+	reloaded, err := model.GetChannelById(savedChannel.Id, true)
+	require.NoError(t, err)
+	require.Equal(t, savedChannel.Key, reloaded.Key)
+	require.True(t, reloaded.ChannelInfo.IsMultiKey)
+	require.Equal(t, savedChannel.ChannelInfo.MultiKeyStatusList, reloaded.ChannelInfo.MultiKeyStatusList)
+
+	// Leaving the key empty means "keep the saved key", so the saved enabled
+	// key is still the one the preview authenticates with.
+	emptyKeyRequest := draftRequest
+	emptyKeyRequest.Key = ""
+	body, err = common.Marshal(emptyKeyRequest)
+	require.NoError(t, err)
+
+	recorder = httptest.NewRecorder()
+	ctx, _ = gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/channel/fetch_models", bytes.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	FetchModels(ctx)
+
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	require.True(t, response.Success, response.Message)
+	headers = <-receivedHeaders
+	require.Equal(t, "Bearer enabled-saved-key", headers.Get("Authorization"))
+}
+
+func TestFetchModelsAdvancedCustomPreviewRejectsMalformedHeaderOverride(t *testing.T) {
+	baseURL := "https://example.invalid"
+	malformed := `{"X-Header": `
+	_, err := buildAdvancedCustomModelPreviewChannel(fetchModelsRequest{
+		Type:           constant.ChannelTypeAdvancedCustom,
+		BaseURL:        &baseURL,
+		Key:            "draft-key",
+		HeaderOverride: &malformed,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "header_override must be a JSON object")
+}
+
+func TestFetchModelsOrdinaryChannelEditPreviewUsesDraftKey(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	receivedAuthorization := make(chan string, 3)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuthorization <- r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"data":[{"id":"ordinary-model"}]}`))
+	}))
+	defer server.Close()
+
+	savedBaseURL := "http://127.0.0.1:1"
+	savedChannel := &model.Channel{
+		Type:    constant.ChannelTypeOpenAI,
+		Key:     "saved-key",
+		BaseURL: &savedBaseURL,
+	}
+	require.NoError(t, db.Create(savedChannel).Error)
+
+	baseURL := server.URL
+	draftRequest := fetchModelsRequest{
+		ChannelID: savedChannel.Id,
+		Type:      constant.ChannelTypeOpenAI,
+		Key:       "draft-key",
+		BaseURL:   &baseURL,
+	}
+	body, err := common.Marshal(draftRequest)
+	require.NoError(t, err)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/channel/fetch_models", bytes.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	FetchModels(ctx)
+
+	var response struct {
+		Success bool     `json:"success"`
+		Message string   `json:"message"`
+		Data    []string `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	require.True(t, response.Success, response.Message)
+	require.Equal(t, []string{"ordinary-model"}, response.Data)
+	require.Equal(t, "Bearer draft-key", <-receivedAuthorization)
+
+	// An empty draft key keeps the saved credential.
+	emptyKeyRequest := draftRequest
+	emptyKeyRequest.Key = ""
+	body, err = common.Marshal(emptyKeyRequest)
+	require.NoError(t, err)
+
+	recorder = httptest.NewRecorder()
+	ctx, _ = gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/channel/fetch_models", bytes.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	FetchModels(ctx)
+
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	require.True(t, response.Success, response.Message)
+	require.Equal(t, "Bearer saved-key", <-receivedAuthorization)
+
+	// A CRLF-pasted batch still previews with the first credential only, and
+	// the stray "\r" must not reach the Authorization header.
+	crlfRequest := draftRequest
+	crlfRequest.Key = "draft-key\r\nanother-key"
+	body, err = common.Marshal(crlfRequest)
+	require.NoError(t, err)
+
+	recorder = httptest.NewRecorder()
+	ctx, _ = gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/channel/fetch_models", bytes.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	FetchModels(ctx)
+
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	require.True(t, response.Success, response.Message)
+	require.Equal(t, "Bearer draft-key", <-receivedAuthorization)
+
+	reloaded, err := model.GetChannelById(savedChannel.Id, true)
+	require.NoError(t, err)
+	require.Equal(t, "saved-key", reloaded.Key)
 }
 
 func TestFailedAdvancedCustomDetectionDoesNotStageFullRemoval(t *testing.T) {

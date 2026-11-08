@@ -1192,13 +1192,23 @@ export function ChannelMutateDrawer({
     [currentModelsArray, form]
   )
 
-  // Ordinary edits use the saved channel. Advanced Custom retains its existing
-  // preview path, which reuses the saved credential on the server.
+  // A model preview has to exercise the credential the operator is about to
+  // save. The form never pre-fills the stored key, so a key typed here is the
+  // only signal that the saved one is stale: when it is present the preview
+  // runs through the draft path, which sends the new key to the upstream.
+  // Without a draft key the saved credential is still the right one, so
+  // ordinary edits keep using the saved channel (and operators without
+  // sensitive-write permission keep their read-only discovery).
+  const draftKey = currentKey?.trim() ?? ''
+  const hasDraftKey = draftKey.length > 0
   const previewModels =
     !isEditing ||
-    (currentType === CHANNEL_TYPE_ADVANCED_CUSTOM && canEditSensitive)
+    (canEditSensitive &&
+      (currentType === CHANNEL_TYPE_ADVANCED_CUSTOM || hasDraftKey))
   const canDiscoverModels = previewModels ? canEditSensitive : canOperateChannel
-  const previewKey = isEditing ? undefined : currentKey
+  // Undefined keeps the saved key on the server side: an empty key field in
+  // edit mode means "keep existing key", not "clear the key".
+  const previewKey = hasDraftKey ? currentKey : undefined
   const previewRequest = useMemo<ChannelModelDiscoveryRequest>(
     () => ({
       kind: 'preview',

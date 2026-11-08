@@ -1506,35 +1506,170 @@ type fetchModelsRequest struct {
 	Tag            *string `json:"tag"`
 }
 
+// applyModelPreviewKey lays the credential the operator typed in the edit form
+// over the preview channel.
+//
+// The edit form never pre-fills the stored credential, so an empty draft key
+// means "keep the saved key". A non-empty draft key is the credential the
+// operator is about to save, and the preview has to authenticate with exactly
+// that one -- otherwise "fetch models" keeps validating the stale saved key
+// while the operator has already switched to the new one.
+func applyModelPreviewKey(channel *model.Channel, req fetchModelsRequest) {
+	draftKey := strings.TrimSpace(req.Key)
+	if draftKey == "" {
+		return
+	}
+	if channel.Type != constant.ChannelTypeCodex {
+		// Same rule as the create-time preview: the first line is the
+		// credential, the remaining lines are the rest of a batch. Trim again
+		// so a CRLF paste never leaks a "\r" into the Authorization header.
+		draftKey = strings.TrimSpace(strings.Split(draftKey, "\n")[0])
+	}
+	channel.Key = draftKey
+	// The preview authenticates with this single draft credential. Keeping
+	// the saved multi-key state would let GetNextEnabledKey pick a stale key
+	// from the saved list instead, and its polling bookkeeping writes the
+	// preview's channel_info back to the saved channel.
+	channel.ChannelInfo.IsMultiKey = false
+	channel.ChannelInfo.MultiKeyStatusList = nil
+	channel.ChannelInfo.MultiKeyPollingIndex = 0
+}
+
+// applyModelPreviewConnection lays the draft connection fields from the edit
+// form over the preview channel. Fields the form did not send are left alone,
+// so the saved configuration still applies.
+func applyModelPreviewConnection(channel *model.Channel, req fetchModelsRequest) {
+	if req.BaseURL != nil {
+		baseURL := strings.TrimSpace(*req.BaseURL)
+		channel.BaseURL = &baseURL
+	}
+	if req.HeaderOverride != nil {
+		rawHeaderOverride := strings.TrimSpace(*req.HeaderOverride)
+		channel.HeaderOverride = &rawHeaderOverride
+	}
+	if req.Proxy != nil {
+		channelSettings := channel.GetSetting()
+		channelSettings.Proxy = strings.TrimSpace(*req.Proxy)
+		channel.SetSetting(channelSettings)
+	}
+	if req.Name != nil {
+		channel.Name = strings.TrimSpace(*req.Name)
+	}
+	if req.Tag != nil {
+		tag := strings.TrimSpace(*req.Tag)
+		channel.Tag = &tag
+	}
+}
+
+// modelPreviewShadow returns an unsaved copy of a saved channel for a preview
+// that carries a draft credential.
+//
+// The fetch path persists state by channel id (multi-key polling indexes,
+// refreshed Codex credentials) and the settings accessors repair corrupt JSON
+// with a Save. None of that may touch the saved row while the preview runs on
+// a credential the operator has not committed yet, so the copy carries no id.
+// Both JSON columns are normalized first because a repair on an id-less copy
+// would insert a new row instead of updating the existing one.
+func modelPreviewShadow(channel *model.Channel) *model.Channel {
+	shadow := *channel
+	shadow.Setting = nil
+	shadow.OtherSettings = ""
+	shadow.SetSetting(channel.GetSetting())
+	shadow.SetOtherSettings(channel.GetOtherSettings())
+	shadow.Id = 0
+	return &shadow
+}
+
+// buildSavedChannelModelPreviewChannel builds the preview channel for an
+// edit-time model discovery on a channel that is not advanced custom.
+//
+// The saved channel is the base so every type-specific setting (credentials
+// kept in channel_info, settings JSON, route presets, proxy) still applies,
+// and the draft fields from the request are laid on top.
+func buildSavedChannelModelPreviewChannel(req fetchModelsRequest) (*model.Channel, error) {
+	savedChannel, err := model.GetChannelById(req.ChannelID, true)
+	if err != nil {
+		return nil, err
+	}
+	if req.Type > 0 && req.Type != savedChannel.Type {
+		// The provider was switched in the draft. The saved channel's
+		// type-specific settings belong to the previous provider, so preview
+		// from the form alone instead of mixing two configurations.
+		return buildDraftChannelModelPreviewChannel(req)
+	}
+	channel := savedChannel
+	if strings.TrimSpace(req.Key) != "" {
+		channel = modelPreviewShadow(savedChannel)
+		applyModelPreviewKey(channel, req)
+	}
+	applyModelPreviewConnection(channel, req)
+	return channel, nil
+}
+
+// buildDraftChannelModelPreviewChannel builds the preview channel from the
+// request alone, for a channel that is not saved yet (or whose provider was
+// switched in the draft, which invalidates the saved configuration).
+func buildDraftChannelModelPreviewChannel(req fetchModelsRequest) (*model.Channel, error) {
+	baseURL := ""
+	if req.BaseURL != nil {
+		baseURL = strings.TrimSpace(*req.BaseURL)
+	}
+	if baseURL == "" {
+		baseURL = constant.GetChannelBaseURL(req.Type)
+	}
+	// Resolve the default base URL before the shared override pass so an
+	// explicitly empty base_url still falls back to the provider default.
+	resolved := req
+	resolved.BaseURL = &baseURL
+	channel := &model.Channel{Type: req.Type}
+	applyModelPreviewKey(channel, req)
+	applyModelPreviewConnection(channel, resolved)
+	return channel, nil
+}
+
 func buildAdvancedCustomModelPreviewChannel(req fetchModelsRequest) (*model.Channel, error) {
 	var channel *model.Channel
-	if req.ChannelID > 0 {
+	fromDraft := req.ChannelID <= 0
+	if !fromDraft {
 		savedChannel, err := model.GetChannelById(req.ChannelID, true)
 		if err != nil {
 			return nil, err
 		}
 		if savedChannel.Type != constant.ChannelTypeAdvancedCustom {
-			return nil, fmt.Errorf("channel %d is not an advanced custom channel", req.ChannelID)
+			if req.Type != constant.ChannelTypeAdvancedCustom {
+				return nil, fmt.Errorf("channel %d is not an advanced custom channel", req.ChannelID)
+			}
+			// The draft switched this channel to advanced custom, so the
+			// saved configuration belongs to the previous provider.
+			fromDraft = true
+		} else if strings.TrimSpace(req.Key) != "" {
+			channel = modelPreviewShadow(savedChannel)
+			applyModelPreviewKey(channel, req)
+		} else {
+			channel = savedChannel
 		}
-		channel = savedChannel
-	} else {
-		key := strings.TrimSpace(req.Key)
-		if key != "" {
-			key = strings.Split(key, "\n")[0]
-		}
-		channel = &model.Channel{
-			Type: req.Type,
-			Key:  key,
-		}
+	}
+	if fromDraft {
+		channel = &model.Channel{Type: req.Type}
+		applyModelPreviewKey(channel, req)
 	}
 
 	if channel.Type != constant.ChannelTypeAdvancedCustom {
 		return nil, fmt.Errorf("channel type must be advanced custom")
 	}
-	if req.BaseURL != nil {
-		baseURL := strings.TrimSpace(*req.BaseURL)
-		channel.BaseURL = &baseURL
+	// Advanced custom previews reject a malformed header override here instead
+	// of letting GetHeaderOverride swallow it: the operator would otherwise
+	// preview a request that silently lacks the headers they just edited.
+	if req.HeaderOverride != nil {
+		rawHeaderOverride := strings.TrimSpace(*req.HeaderOverride)
+		if rawHeaderOverride != "" {
+			var headerOverride map[string]any
+			if err := common.UnmarshalJsonStr(rawHeaderOverride, &headerOverride); err != nil {
+				return nil, fmt.Errorf("header_override must be a JSON object: %w", err)
+			}
+		}
 	}
+	applyModelPreviewConnection(channel, req)
 
 	settings := channel.GetOtherSettings()
 	if req.AdvancedCustom != nil {
@@ -1547,26 +1682,10 @@ func buildAdvancedCustomModelPreviewChannel(req fetchModelsRequest) (*model.Chan
 			return nil, err
 		}
 		settings.AdvancedCustom = &config
-	} else if req.ChannelID <= 0 {
+	} else if fromDraft {
 		return nil, fmt.Errorf("advanced_custom is required")
 	}
 	channel.SetOtherSettings(settings)
-
-	if req.HeaderOverride != nil {
-		rawHeaderOverride := strings.TrimSpace(*req.HeaderOverride)
-		if rawHeaderOverride != "" {
-			var headerOverride map[string]any
-			if err := common.UnmarshalJsonStr(rawHeaderOverride, &headerOverride); err != nil {
-				return nil, fmt.Errorf("header_override must be a JSON object: %w", err)
-			}
-		}
-		channel.HeaderOverride = &rawHeaderOverride
-	}
-	if req.Proxy != nil {
-		channelSettings := channel.GetSetting()
-		channelSettings.Proxy = strings.TrimSpace(*req.Proxy)
-		channel.SetSetting(channelSettings)
-	}
 
 	if err := validateChannel(channel, false); err != nil {
 		return nil, err
@@ -1586,50 +1705,23 @@ func FetchModels(c *gin.Context) {
 	}
 
 	var channel *model.Channel
-	if req.Type == constant.ChannelTypeAdvancedCustom || req.ChannelID > 0 {
-		var err error
+	var err error
+	switch {
+	case req.ChannelID > 0 && req.Type == constant.ChannelTypeAdvancedCustom:
 		channel, err = buildAdvancedCustomModelPreviewChannel(req)
-		if err != nil {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": err.Error(),
-			})
-			return
-		}
-	} else {
-		baseURL := ""
-		if req.BaseURL != nil {
-			baseURL = strings.TrimSpace(*req.BaseURL)
-		}
-		if baseURL == "" {
-			baseURL = constant.GetChannelBaseURL(req.Type)
-		}
-
-		key := strings.TrimSpace(req.Key)
-		if req.Type != constant.ChannelTypeCodex {
-			key = strings.Split(key, "\n")[0]
-		}
-		channel = &model.Channel{
-			Type:    req.Type,
-			Key:     key,
-			BaseURL: &baseURL,
-		}
-		if req.Name != nil {
-			channel.Name = strings.TrimSpace(*req.Name)
-		}
-		if req.Tag != nil {
-			tag := strings.TrimSpace(*req.Tag)
-			channel.Tag = &tag
-		}
-		if req.Proxy != nil {
-			channelSettings := channel.GetSetting()
-			channelSettings.Proxy = strings.TrimSpace(*req.Proxy)
-			channel.SetSetting(channelSettings)
-		}
-		if req.HeaderOverride != nil {
-			rawHeaderOverride := strings.TrimSpace(*req.HeaderOverride)
-			channel.HeaderOverride = &rawHeaderOverride
-		}
+	case req.ChannelID > 0:
+		channel, err = buildSavedChannelModelPreviewChannel(req)
+	case req.Type == constant.ChannelTypeAdvancedCustom:
+		channel, err = buildAdvancedCustomModelPreviewChannel(req)
+	default:
+		channel, err = buildDraftChannelModelPreviewChannel(req)
+	}
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
 	}
 
 	models, err := fetchChannelUpstreamModelIDs(channel)
