@@ -5277,6 +5277,7 @@
     "Select syncable models on this page": "Выбрать доступные модели на этой странице",
     "Select task plugin": "Выберите плагин задач",
     "Select the API endpoint region": "Выбрать регион конечной точки API",
+    "Doubao Coding Plan": "Тариф Doubao Coding",
     "Select the fields you want to overwrite with upstream data. Unselected fields keep their local values.": "Выберите поля, которые вы хотите перезаписать данными из вышестоящего источника. Невыбранные поля сохранят свои локальные значения.",
     "Select the models to keep in this channel.": "Выберите модели, которые нужно оставить в этом канале.",
     "Select the task plugins installed on the upstream gateway": "Выберите плагины задач, установленные на вышестоящем шлюзе",

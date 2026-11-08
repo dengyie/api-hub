@@ -5284,6 +5284,7 @@
     "Select syncable models on this page": "このページの同期可能なモデルを選択",
     "Select task plugin": "タスクプラグインを選択",
     "Select the API endpoint region": "APIエンドポイントのリージョンを選択",
+    "Doubao Coding Plan": "Doubao Coding プラン",
     "Select the fields you want to overwrite with upstream data. Unselected fields keep their local values.": "アップストリームデータで上書きしたいフィールドを選択してください。選択されていないフィールドはローカル値を保持します。",
     "Select the models to keep in this channel.": "このチャネルに残すモデルを選択してください。",
     "Select the task plugins installed on the upstream gateway": "上流ゲートウェイにインストールされているタスクプラグインを選択",

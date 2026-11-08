@@ -2839,3 +2839,38 @@ test('a New API channel binds upstream task plugins and publishes their models',
   expect(setting).not.toHaveProperty('task_plugin_key')
   expect(payload.models?.split(',').sort()).toEqual(['gpt-5', 'video-b-1'])
 })
+
+test('editing a Doubao Coding Plan channel keeps its special base URL instead of rewriting it', async () => {
+  editingChannel = channelSchema.parse({
+    ...editingChannel,
+    type: 45,
+    base_url: 'doubao-coding-plan',
+    models: 'doubao-seed-1-6',
+  })
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+
+  expect(screen.getAllByText(/API Base URL/).length).toBeGreaterThan(0)
+  expect(screen.getByText('Doubao Coding Plan')).toBeVisible()
+  expect(screen.queryByText('https://ark.cn-beijing.volces.com')).not.toBeInTheDocument()
+
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  expect(put.mock.calls[0]?.[1]).toEqual(
+    expect.objectContaining({ base_url: 'doubao-coding-plan' })
+  )
+})
+
+test('creating a VolcEngine channel does not offer the stored Coding Plan key', async () => {
+  const user = userEvent.setup()
+  render(<ConfigurationHarness />)
+  await user.click(screen.getByRole('option', { name: /^VolcEngine / }))
+
+  // The special value is only offered while a channel actually stores it, so a
+  // new channel can never be created against the Coding Plan endpoint by accident.
+  expect(screen.queryByText('Doubao Coding Plan')).not.toBeInTheDocument()
+})

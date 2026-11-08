@@ -278,6 +278,9 @@ const MODEL_MAPPING_PREVIEW_FALLBACK: Array<{
 
 const ADVANCED_CUSTOM_ROUTE_TYPE_PREVIEW_LIMIT = 3
 const UPSTREAM_DETECTED_MODEL_PREVIEW_LIMIT = 8
+// 火山方舟 CodingPlan 订阅渠道（如 #365）的真实 base_url 存储值。后端
+// ChannelSpecialBases 据此路由到 /api/coding/v3 与 /api/coding/v1。
+const CHANNEL_SPECIAL_BASE_DOUBAO_CODING_PLAN = 'doubao-coding-plan'
 const SENSITIVE_FORM_FIELDS = [
   'type',
   'base_url',
@@ -1098,13 +1101,16 @@ export function ChannelMutateDrawer({
   }, [currentType, isEditing, form])
 
   useEffect(() => {
+    // 编辑态必须放行：doubao-coding-plan 是真实存储值而非输入残留，改写并保存
+    // 会让 #365 这类 CodingPlan 渠道落到 /api/v3 端点（上游 404 ModelNotOpen）。
+    if (isEditing) return
     if (currentType !== 45 || currentBaseUrl !== 'doubao-coding-plan') return
 
     form.setValue('base_url', 'https://ark.cn-beijing.volces.com', {
       shouldDirty: false,
       shouldValidate: true,
     })
-  }, [currentBaseUrl, currentType, form])
+  }, [isEditing, currentBaseUrl, currentType, form])
 
   useEffect(() => {
     if (isEditing || supportsMultiKeyAddMode) return
@@ -4098,6 +4104,19 @@ export function ChannelMutateDrawer({
                     <Select
                       disabled={sensitiveLocked}
                       items={[
+                        // doubao-coding-plan 是真实存储值（CodingPlan 订阅渠道，如 #365），
+                        // 必须作为可选项原样呈现：既不能显示成原域名误导运营者，
+                        // 也不能让「打开编辑后不改」的保存把它改写成 /api/v3 端点。
+                        ...(currentBaseUrl ===
+                        CHANNEL_SPECIAL_BASE_DOUBAO_CODING_PLAN
+                          ? [
+                              {
+                                value:
+                                  CHANNEL_SPECIAL_BASE_DOUBAO_CODING_PLAN,
+                                label: t('Doubao Coding Plan'),
+                              },
+                            ]
+                          : []),
                         {
                           value: 'https://ark.cn-beijing.volces.com',
                           label: t('https://ark.cn-beijing.volces.com'),
@@ -4108,11 +4127,7 @@ export function ChannelMutateDrawer({
                         },
                       ]}
                       onValueChange={field.onChange}
-                      value={
-                        field.value === 'doubao-coding-plan'
-                          ? 'https://ark.cn-beijing.volces.com'
-                          : field.value || 'https://ark.cn-beijing.volces.com'
-                      }
+                      value={field.value || 'https://ark.cn-beijing.volces.com'}
                     >
                       <FormControl>
                         <SelectTrigger>
@@ -4121,6 +4136,14 @@ export function ChannelMutateDrawer({
                       </FormControl>
                       <SelectContent alignItemWithTrigger={false}>
                         <SelectGroup>
+                          {currentBaseUrl ===
+                            CHANNEL_SPECIAL_BASE_DOUBAO_CODING_PLAN && (
+                            <SelectItem
+                              value={CHANNEL_SPECIAL_BASE_DOUBAO_CODING_PLAN}
+                            >
+                              {t('Doubao Coding Plan')}
+                            </SelectItem>
+                          )}
                           <SelectItem value='https://ark.cn-beijing.volces.com'>
                             {t('https://ark.cn-beijing.volces.com')}
                           </SelectItem>

@@ -5277,6 +5277,7 @@
     "Select syncable models on this page": "Chọn mô hình có thể đồng bộ trên trang này",
     "Select task plugin": "Chọn plugin tác vụ",
     "Select the API endpoint region": "Chọn khu vực điểm cuối API",
+    "Doubao Coding Plan": "Gói Doubao Coding",
     "Select the fields you want to overwrite with upstream data. Unselected fields keep their local values.": "Chọn các trường bạn muốn ghi đè bằng dữ liệu thượng nguồn. Các trường không được chọn sẽ giữ nguyên giá trị cục bộ của chúng.",
     "Select the models to keep in this channel.": "Chọn các mô hình cần giữ lại trong kênh này.",
     "Select the task plugins installed on the upstream gateway": "Chọn các plugin tác vụ đã cài trên gateway thượng nguồn",

@@ -5290,6 +5290,7 @@
     "Select syncable models on this page": "全选本页可同步项",
     "Select task plugin": "选择任务插件",
     "Select the API endpoint region": "选择 API 终端节点区域",
+    "Doubao Coding Plan": "豆包 Coding 套餐",
     "Select the fields you want to overwrite with upstream data. Unselected fields keep their local values.": "选择要使用上游数据覆盖的字段。未选择的字段将保留其本地值。",
     "Select the models to keep in this channel.": "选择要在此渠道中保留的模型。",
     "Select the task plugins installed on the upstream gateway": "选择上游网关已安装的任务插件",

@@ -5290,6 +5290,7 @@
     "Select syncable models on this page": "Select syncable models on this page",
     "Select task plugin": "Select task plugin",
     "Select the API endpoint region": "Select the API endpoint region",
+    "Doubao Coding Plan": "Doubao Coding Plan",
     "Select the fields you want to overwrite with upstream data. Unselected fields keep their local values.": "Select the fields you want to overwrite with upstream data. Unselected fields keep their local values.",
     "Select the models to keep in this channel.": "Select the models to keep in this channel.",
     "Select the task plugins installed on the upstream gateway": "Select the task plugins installed on the upstream gateway",
