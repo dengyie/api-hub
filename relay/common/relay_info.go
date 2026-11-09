@@ -39,6 +39,21 @@ type ThinkTagSplitState struct {
 	Carry string
 }
 
+// ReasoningCoalesceState 是 reasoning 微帧合并的跨帧状态：部分上游把原生
+// reasoning_content 一词一帧下发，帧感知客户端会把思考炸成 token 级块。
+// 网关把连续的纯 reasoning 增量缓冲到阈值（或遇到任何非 reasoning 帧、
+// 流终止）再以一帧发出。LastFrame 保留最近一个被缓冲的原始帧，冲刷时作为
+// 合并帧的信封复用（同流内 id/created/model 一致）。每次尝试开始时必须
+// 归零（换渠道重试不得继承上一渠道的缓冲）。
+type ReasoningCoalesceState struct {
+	Pending   string
+	LastFrame string
+	Held      bool
+}
+
+// Reset 清空缓冲（取帧冲刷与跨尝试归零共用）。
+func (s *ReasoningCoalesceState) Reset() { *s = ReasoningCoalesceState{} }
+
 const (
 	LastMessageTypeNone     = convmeta.LastMessageTypeNone
 	LastMessageTypeText     = convmeta.LastMessageTypeText
@@ -236,6 +251,10 @@ type RelayInfo struct {
 	// （`<think>...</think>` 从 content 拆入 reasoning_content），
 	// 每次尝试开始时必须归零（换渠道重试不得继承上一渠道的相位）。
 	ThinkTagSplit ThinkTagSplitState
+	// ReasoningCoalesce 是 reasoning 微帧合并的跨帧状态
+	// （ChannelSettings.DisableReasoningCoalesce=false 时生效），
+	// 每次尝试开始时必须归零（换渠道重试不得继承上一渠道的缓冲）。
+	ReasoningCoalesce ReasoningCoalesceState
 	TokenCountMeta
 	*ClaudeConvertInfo
 	*RerankerInfo

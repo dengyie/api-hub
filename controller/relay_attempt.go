@@ -106,6 +106,8 @@ func executeRelayAttempt(
 	relayInfo.StreamStatus = nil
 	// think_tag_to_reasoning 的跨帧状态机按渠道开关生效，换渠道重试不得继承上一渠道的相位
 	relayInfo.ThinkTagSplit = relaycommon.ThinkTagSplitState{}
+	// reasoning 微帧合并的缓冲同理：换渠道重试不得继承上一渠道的缓冲帧
+	relayInfo.ReasoningCoalesce = relaycommon.ReasoningCoalesceState{}
 	relayInfo.PerformanceBusinessRejection = false
 	relayInfo.PerformanceOutputTokens = 0
 	relayInfo.RetryIndex = retryParam.GetRetry()

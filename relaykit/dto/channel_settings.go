@@ -49,6 +49,17 @@ type ChannelSettings struct {
 	// Per-channel opt-in, default off — see ReasoningAsContent for why this
 	// cannot be automatic.
 	ThinkTagToReasoning bool `json:"think_tag_to_reasoning,omitempty"`
+	// DisableReasoningCoalesce opts a channel out of the gateway-side reasoning
+	// micro-frame coalescing: merging consecutive pure reasoning_content deltas
+	// into frames of >=256 bytes before delivery (fourth variant of the
+	// word-per-thinking-block family — some upstreams emit native
+	// reasoning_content one word per SSE frame, e.g. "#118 cpa-yimingtalk"
+	// measured 2026-11-10, and frame-aware clients explode each frame into its
+	// own thinking block). The merge is lossless reframing — same bytes of
+	// reasoning, fewer frames, billing parsed from the original frames — so it
+	// defaults to on. Opt out only for a client that depends on exact upstream
+	// frame boundaries.
+	DisableReasoningCoalesce bool `json:"disable_reasoning_coalesce,omitempty"`
 	// SystemOneFlavor selects the upstream dialect for type-65 jev channels:
 	// "" (default) = native System One passthrough (TypeSafe / FuturePPO /
 	// MindsHub), "bivia" = translate the jev envelope onto Articul8 Bivia's

@@ -25,6 +25,21 @@ func HandleStreamFormat(c *gin.Context, info *relaycommon.RelayInfo, data string
 	if helper.IsEmptyStreamFrame(data) {
 		return nil
 	}
+	// reasoning 微帧合并：逐词 reasoning 帧先缓冲，返回本轮真正要写的帧序列
+	// （0..2 帧；0 帧=已缓冲）。计费/usage 解析读的是上游原始帧，不受影响。
+	for _, frame := range coalesceReasoningStreamFrame(info, data) {
+		if err := writeStreamFrameDirect(c, info, frame, forceFormat, thinkToContent); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeStreamFrameDirect 把一帧按当前 relay 格式写出（无合并过滤）。
+func writeStreamFrameDirect(c *gin.Context, info *relaycommon.RelayInfo, data string, forceFormat bool, thinkToContent bool) error {
+	if helper.IsEmptyStreamFrame(data) {
+		return nil
+	}
 	switch info.RelayFormat {
 	case types.RelayFormatOpenAI:
 		info.SendResponseCount++
@@ -228,6 +243,14 @@ func handleLastResponse(lastStreamData string, responseId *string, createAt *int
 func HandleFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, lastStreamData string,
 	responseId string, createAt int64, model string, systemFingerprint string,
 	usage *dto.Usage, containStreamUsage bool) {
+
+	// reasoning 微帧合并的终态冲刷：缓冲的思考增量必须在任何终态语义之前
+	// 送达（正常收尾、异常终止都不能扣字）。OaiStreamHandler 已在终帧前
+	// 冲刷过，这里是无害的幂等兜底；gemini 上游路径的终帧只经过本函数，
+	// 全靠这一处。
+	if flushErr := writeCoalescedFlush(c, info, info != nil && info.ChannelSetting.ForceFormat, info != nil && info.ChannelSetting.ThinkingToContent); flushErr != nil {
+		logger.LogWarn(c, "reasoning coalesce flush failed: "+flushErr.Error())
+	}
 
 	if info != nil && info.StreamStatus != nil && !info.StreamStatus.IsNormalEnd() {
 		logger.LogWarn(c, fmt.Sprintf("stream ended abnormally (%s), skipping final [DONE] frame", info.StreamStatus.Summary()))

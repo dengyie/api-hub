@@ -87,6 +87,11 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 		// 而空产出会被估成整段 prompt —— 那等于给一次失败的请求收一遍全款。
 		// responseTextBuilder 同时收了正文、reasoning 与工具名/参数，非空即代表
 		// 客户端确实拿到了可计费内容。
+		//
+		// 断流前尽力冲刷 reasoning 微帧缓冲：缓冲里是已从上游收到、但还没下发
+		// 的思考增量，扣掉等于客户端看到的思考缺尾巴。写失败静默忽略（写通道
+		// 可能已死）。
+		_ = writeCoalescedFlush(c, info, info != nil && info.ChannelSetting.ForceFormat, info != nil && info.ChannelSetting.ThinkingToContent)
 		interrupted := service.InterruptedTextUsage(c, info, responseTextBuilder.String())
 		if interrupted != nil {
 			interrupted.CompletionTokens += toolCount * 7
@@ -124,6 +129,14 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 					usage.InputTokens, usage.OutputTokens)
 			}
 		}
+	}
+
+	// reasoning 微帧合并的终态冲刷：缓冲的思考增量必须先于终帧送达。
+	// OpenAI 格式的终帧在下方 sendStreamData 直写（不经 HandleStreamFormat
+	// 过滤层），Claude/Gemini 格式的终帧在 HandleFinalResponse 内转换 ——
+	// 两者的前置冲刷都在这里；HandleFinalResponse 入口还有幂等兜底。
+	if err := writeCoalescedFlush(c, info, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent); err != nil {
+		logger.LogError(c, "reasoning coalesce flush failed: "+err.Error())
 	}
 
 	if info.RelayFormat == types.RelayFormatOpenAI {
