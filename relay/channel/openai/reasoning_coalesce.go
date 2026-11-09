@@ -2,11 +2,14 @@ package openai
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 
+	"github.com/dengyie/apihub/common"
+	"github.com/dengyie/apihub/logger"
 	relaycommon "github.com/dengyie/apihub/relay/common"
 )
 
@@ -25,16 +28,24 @@ import (
 //
 // 设计约束：
 //   - 默认开启（无损），ChannelSettings.DisableReasoningCoalesce 按渠道豁免。
-//   - 只缓冲「纯 reasoning 增量帧」：带 role / content / tool_calls /
+//   - 只缓冲「纯 reasoning 增量帧」：带实义 content / tool_calls /
 //     finish_reason / usage / error / 多 choice 的帧先冲刷缓冲再原样下发，
-//     全程保序。
+//     全程保序（role 与空占位键不算载荷，见 classifyReasoningFrame）。
 //   - 阈值冲刷 + 终态冲刷（流正常结束、异常中断、HandleFinalResponse 前）。
 //   - 与逐帧状态机改写器互斥：ThinkTagToReasoning / ReasoningAsContent /
 //     ThinkingToContent 任一开启时整路旁路——那些状态机必须看到每一帧。
 //   - 信封复用：冲刷帧 = 最近一个被缓冲帧的原始字节仅改写 reasoning 字段，
 //     同流内 id/created/model 等字段逐字节存活。
+//   - 计数器（Swallowed/Flushed）按尝试累计、冲刷不清零，流尾输出摘要，
+//     单流扣压超阈值打帧风暴告警（渠道归因）。
 
-const reasoningCoalesceThreshold = 256 // 字节；逐词帧 ~8-15B，约 20-40 词合并为一帧
+const (
+	// reasoningCoalesceThreshold 字节；逐词帧 ~8-15B，约 20-40 词合并为一帧。
+	reasoningCoalesceThreshold = 256
+	// reasoningCoalesceStormFrames 单流扣压帧数告警阈值：正常逐词上游一次
+	// 长思考约吞 30-60 帧；超过该值基本可断定上游在逐词下发，值得归因记录。
+	reasoningCoalesceStormFrames = 200
+)
 
 // reasoningCoalesceEligible 判定本请求是否走合并层。
 func reasoningCoalesceEligible(info *relaycommon.RelayInfo) bool {
@@ -83,21 +94,24 @@ func isEmptyJSONPlaceholder(v gjson.Result) bool {
 // role 恒为帧形标记（生产上游每帧重复 "role":"assistant"），空占位不带
 // 载荷；任何实义载荷（content 文本、tool_calls 元素、数字/布尔标量）都
 // 意味着这帧还承载了思考以外的东西。
+//
+// finish_reason 三种合法形态都算「未终止」：键缺失 / null / 空串——部分
+// 上游（#118 实测）用 "finish_reason":"" 表示进行中，只有非空串
+// （"stop"/"length"/…）才是真实终态。
+//
+// 实现走 gjson 单趟遍历（ForEach + 数组计数路径），不构造中间 map/切片：
+// 该函数位于流式热路径，每个 reasoning 帧都会执行一次。
 func classifyReasoningFrame(data string) (reasoning string, pure bool) {
-	choices := gjson.Get(data, "choices")
-	if !choices.IsArray() {
+	// choices.# 取数组长度：缺失 / null / 非数组 / 多 choice 一律不缓冲
+	if n := gjson.Get(data, "choices.#"); !n.Exists() || n.Int() != 1 {
 		return "", false
 	}
-	arr := choices.Array()
-	// 多 choice（n>1）不缓冲：帧与 choice 的对应关系会乱
-	if len(arr) != 1 {
+	choice := gjson.Get(data, "choices.0")
+	if !choice.Exists() {
 		return "", false
 	}
-	choice := arr[0]
-	// finish_reason 三种合法形态都算「未终止」：键缺失 / null / 空串——
-	// 部分上游（#118 实测）用 "finish_reason":"" 表示进行中，只有非空串
-	// （"stop"/"length"/…）才是真实终态。非空字符串或其它实义值按终止帧处理。
-	if fr := gjson.Get(choice.Raw, "finish_reason"); fr.Exists() {
+	// finish_reason / usage / error 均为顶层键的简单路径匹配，不下钻嵌套
+	if fr := choice.Get("finish_reason"); fr.Exists() {
 		terminated := false
 		switch {
 		case fr.Type == gjson.Null:
@@ -115,23 +129,34 @@ func classifyReasoningFrame(data string) (reasoning string, pure bool) {
 	if e := gjson.Get(data, "error"); e.Exists() && e.Type != gjson.Null {
 		return "", false
 	}
-	delta := gjson.Get(choice.Raw, "delta")
+	delta := choice.Get("delta")
 	if !delta.Exists() || !delta.IsObject() {
 		return "", false
 	}
-	for name, val := range delta.Map() {
-		if name == "reasoning_content" || name == "reasoning" || name == "role" {
-			continue
+	var rc, rs gjson.Result
+	pure = true
+	delta.ForEach(func(key, value gjson.Result) bool {
+		switch key.String() {
+		case "reasoning_content":
+			rc = value
+		case "reasoning":
+			rs = value
+		case "role":
+			// 帧形标记，恒放行
+		default:
+			if !isEmptyJSONPlaceholder(value) {
+				pure = false
+				return false
+			}
 		}
-		if !isEmptyJSONPlaceholder(val) {
-			return "", false
-		}
+		return true
+	})
+	if !pure {
+		return "", false
 	}
-	rc := gjson.Get(delta.Raw, "reasoning_content")
 	if rc.Type == gjson.String && rc.Str != "" {
 		return rc.Str, true
 	}
-	rs := gjson.Get(delta.Raw, "reasoning")
 	if rs.Type == gjson.String && rs.Str != "" {
 		return rs.Str, true
 	}
@@ -161,7 +186,7 @@ func coalesceReasoningStreamFrame(info *relaycommon.RelayInfo, data string) []st
 	}
 	st.Pending += reasoning
 	st.LastFrame = data
-	st.Held = true
+	st.SwallowedFrames++
 	if len(st.Pending) >= reasoningCoalesceThreshold {
 		if frame := takeReasoningFlushFrame(info); frame != "" {
 			return []string{frame}
@@ -180,22 +205,28 @@ func flushFirst(info *relaycommon.RelayInfo, data string) []string {
 	return []string{data}
 }
 
-// takeReasoningFlushFrame 取出缓冲的合并帧文本并复位状态；无缓冲返回 ""。
+// takeReasoningFlushFrame 取出缓冲的合并帧文本；无缓冲返回 ""。
 // 复用 LastFrame 的原始信封，仅把 reasoning 字段改写为累计文本；信封改写
-// 失败时退化为透传 LastFrame（丢失的只是更早缓冲的增量，不产生重复文本）。
+// 失败时退化为透传 LastFrame（丢失的只是更早缓冲的增量，不产生重复文本），
+// 并打系统日志留痕——这是唯一可能丢失客户端可见内容的出口。
+// 只清缓冲字段，不清计数器（计数按尝试累计，见 HandleFinalResponse 摘要）。
 func takeReasoningFlushFrame(info *relaycommon.RelayInfo) string {
+	if info == nil {
+		return ""
+	}
 	st := &info.ReasoningCoalesce
-	if !st.Held {
+	if st.LastFrame == "" {
 		return ""
 	}
 	pending, lastFrame := st.Pending, st.LastFrame
-	st.Reset()
-	if pending == "" || lastFrame == "" {
-		return ""
-	}
+	st.Pending, st.LastFrame = "", ""
+	st.FlushedFrames++
+	st.FlushedBytes += len(pending)
 	if frame := rewriteHeldFrameReasoning(lastFrame, pending); frame != "" {
 		return frame
 	}
+	common.SysLog(fmt.Sprintf("reasoning coalesce: flush envelope rewrite failed, dropping %d buffered reasoning bytes (channel %d, model %s)",
+		len(pending), info.GetChannelID(), info.UpstreamModelName))
 	return lastFrame
 }
 
@@ -279,4 +310,23 @@ func writeCoalescedFlush(c *gin.Context, info *relaycommon.RelayInfo, forceForma
 		return nil
 	}
 	return writeStreamFrameDirect(c, info, frame, forceFormat, thinkToContent)
+}
+
+// logReasoningCoalesceSummary 在流尾输出合并摘要：debug 级逐流可见；单流
+// 扣压帧数达到风暴阈值时升级为系统日志（渠道归因），让逐词上游无需探针
+// 即可被动发现。
+func logReasoningCoalesceSummary(c *gin.Context, info *relaycommon.RelayInfo) {
+	if info == nil || !reasoningCoalesceEligible(info) {
+		return
+	}
+	st := &info.ReasoningCoalesce
+	if st.SwallowedFrames == 0 && st.FlushedFrames == 0 {
+		return
+	}
+	if st.SwallowedFrames >= reasoningCoalesceStormFrames {
+		common.SysLog(fmt.Sprintf("reasoning coalesce: word-frame storm swallowed=%d flushed=%d bytes=%d (channel %d, model %s) — upstream streams reasoning one fragment per frame",
+			st.SwallowedFrames, st.FlushedFrames, st.FlushedBytes, info.GetChannelID(), info.UpstreamModelName))
+		return
+	}
+	logger.LogDebug(c, "reasoning coalesce: swallowed=%d flushed=%d bytes=%d", st.SwallowedFrames, st.FlushedFrames, st.FlushedBytes)
 }

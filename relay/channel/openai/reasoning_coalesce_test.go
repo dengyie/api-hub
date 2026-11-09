@@ -112,8 +112,11 @@ func TestReasoningCoalesceSwallowsBelowThreshold(t *testing.T) {
 	if frames := coalesceReasoningStreamFrame(info, wordFrame(" user")); len(frames) != 0 {
 		t.Fatalf("小增量帧应被缓冲, got %v", frames)
 	}
-	if !info.ReasoningCoalesce.Held || info.ReasoningCoalesce.Pending != " user" {
+	if info.ReasoningCoalesce.LastFrame == "" || info.ReasoningCoalesce.Pending != " user" {
 		t.Fatalf("缓冲状态不对: %+v", info.ReasoningCoalesce)
+	}
+	if info.ReasoningCoalesce.SwallowedFrames != 1 {
+		t.Fatalf("扣压计数不对: %+v", info.ReasoningCoalesce)
 	}
 }
 
@@ -126,7 +129,7 @@ func TestReasoningCoalesceRoleFramePassesThrough(t *testing.T) {
 	if len(frames) != 1 || frames[0] != roleFrame {
 		t.Fatalf("role 帧必须原样透传, got %v", frames)
 	}
-	if info.ReasoningCoalesce.Held {
+	if info.ReasoningCoalesce.LastFrame != "" {
 		t.Fatalf("role 帧不得进入缓冲")
 	}
 }
@@ -208,8 +211,11 @@ func TestTakeReasoningFlushFrameResets(t *testing.T) {
 	if second := takeReasoningFlushFrame(info); second != "" {
 		t.Fatalf("取走后必须复位, got %q", second)
 	}
-	if info.ReasoningCoalesce.Held || info.ReasoningCoalesce.Pending != "" {
-		t.Fatalf("状态未复位: %+v", info.ReasoningCoalesce)
+	if info.ReasoningCoalesce.LastFrame != "" || info.ReasoningCoalesce.Pending != "" {
+		t.Fatalf("缓冲未复位: %+v", info.ReasoningCoalesce)
+	}
+	if info.ReasoningCoalesce.FlushedFrames != 1 || info.ReasoningCoalesce.FlushedBytes != len(" more") {
+		t.Fatalf("冲刷计数未累计: %+v", info.ReasoningCoalesce)
 	}
 }
 
@@ -246,7 +252,7 @@ func TestReasoningCoalesceDisabledBypass(t *testing.T) {
 			t.Fatalf("豁免渠道必须逐帧透传, got %v", frames)
 		}
 	}
-	if info.ReasoningCoalesce.Held {
+	if info.ReasoningCoalesce.LastFrame != "" || info.ReasoningCoalesce.SwallowedFrames != 0 {
 		t.Fatalf("豁免渠道不得有缓冲")
 	}
 }

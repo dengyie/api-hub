@@ -44,18 +44,21 @@ type ThinkTagSplitState struct {
 // 网关把连续的纯 reasoning 增量缓冲到阈值（或遇到任何非 reasoning 帧、
 // 流终止）再以一帧发出。LastFrame 保留最近一个被缓冲的原始帧，冲刷时作为
 // 合并帧的信封复用（同流内 id/created/model 一致）。每次尝试开始时必须
-// 归零（换渠道重试不得继承上一渠道的缓冲）。
+// 归零（换渠道重试不得继承上一渠道的缓冲与计数）。
 type ReasoningCoalesceState struct {
 	Pending   string
 	LastFrame string
-	Held      bool
 	// SawPure 标记本尝试是否已见过首个纯 reasoning 帧：首帧立即透传保住
 	// 客户端 TTFT 观感，其后才进入缓冲合并。
 	SawPure bool
+	// SwallowedFrames 是本尝试被扣压合并的上游 reasoning 帧数（按尝试累计，
+	// 冲刷不清零——冲刷只清缓冲字段）。
+	SwallowedFrames int
+	// FlushedFrames / FlushedBytes 是本尝试发出的合并帧数与其中 reasoning
+	// 字节总量，供流尾摘要日志与帧风暴告警使用。
+	FlushedFrames int
+	FlushedBytes  int
 }
-
-// Reset 清空缓冲（取帧冲刷与跨尝试归零共用）。
-func (s *ReasoningCoalesceState) Reset() { *s = ReasoningCoalesceState{} }
 
 const (
 	LastMessageTypeNone     = convmeta.LastMessageTypeNone

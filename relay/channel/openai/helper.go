@@ -251,6 +251,7 @@ func HandleFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, lastStream
 	if flushErr := writeCoalescedFlush(c, info, info != nil && info.ChannelSetting.ForceFormat, info != nil && info.ChannelSetting.ThinkingToContent); flushErr != nil {
 		logger.LogWarn(c, "reasoning coalesce flush failed: "+flushErr.Error())
 	}
+	logReasoningCoalesceSummary(c, info)
 
 	if info != nil && info.StreamStatus != nil && !info.StreamStatus.IsNormalEnd() {
 		logger.LogWarn(c, fmt.Sprintf("stream ended abnormally (%s), skipping final [DONE] frame", info.StreamStatus.Summary()))
