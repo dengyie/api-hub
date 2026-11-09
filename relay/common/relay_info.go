@@ -49,6 +49,9 @@ type ReasoningCoalesceState struct {
 	Pending   string
 	LastFrame string
 	Held      bool
+	// SawPure 标记本尝试是否已见过首个纯 reasoning 帧：首帧立即透传保住
+	// 客户端 TTFT 观感，其后才进入缓冲合并。
+	SawPure bool
 }
 
 // Reset 清空缓冲（取帧冲刷与跨尝试归零共用）。

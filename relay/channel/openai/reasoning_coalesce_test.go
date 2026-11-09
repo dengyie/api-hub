@@ -43,11 +43,50 @@ func frameReasoning(t *testing.T, frame string) string {
 	return obj.Choices[0].Delta.ReasoningContent
 }
 
+// 生产回归（2026-11-10 渠道 #118 实测帧形）：上游在每个 delta 帧里都重复
+// 携带 "role":"assistant" 且一词一帧。首帧立即透传（TTFT），其后逐词帧
+// 必须被缓冲合并——role 不得成为旁路理由。
+func TestReasoningCoalesceMergesRoleRepeatedWordFrames(t *testing.T) {
+	info := coalescePolicy(false)
+	roleWordFrame := func(word string) string {
+		return `{"id":"34ccefde","model":"glm-5.3-flash","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"` + word + `"},"finish_reason":null}]}`
+	}
+	// 首帧：立即透传
+	if frames := coalesceReasoningStreamFrame(info, roleWordFrame("The")); len(frames) != 1 || frames[0] != roleWordFrame("The") {
+		t.Fatalf("首帧必须透传, got %v", frames)
+	}
+	// 后续帧：缓冲直到阈值
+	words := []string{" user", " is", " asking"}
+	for i, w := range words {
+		if frames := coalesceReasoningStreamFrame(info, roleWordFrame(w)); len(frames) != 0 {
+			t.Fatalf("第 %d 个逐词帧应被缓冲, got %v", i+2, frames)
+		}
+	}
+	// 等效阈值前的 content 过渡帧：先冲刷缓冲（含重复 role 的信封），再透传
+	contentFrame := `{"choices":[{"index":0,"delta":{"role":"assistant","content":"正文"},"finish_reason":null}]}`
+	frames := coalesceReasoningStreamFrame(info, contentFrame)
+	if len(frames) != 2 {
+		t.Fatalf("冲刷+透传应产出 2 帧, got %d", len(frames))
+	}
+	if got := frameReasoning(t, frames[0]); got != " user is asking" {
+		t.Fatalf("合并文本必须保序全量: got %q", got)
+	}
+	if !strings.Contains(frames[0], `"id":"34ccefde"`) || !strings.Contains(frames[0], `"model":"glm-5.3-flash"`) {
+		t.Fatalf("合并帧必须复用原信封字段: %s", frames[0])
+	}
+	if !strings.Contains(frames[1], `"content":"正文"`) {
+		t.Fatalf("content 帧必须原样透传: %s", frames[1])
+	}
+}
+
 // 逐词帧被缓冲合并：字节数到阈值才出一帧，拼接文本与原词序一致。
 func TestReasoningCoalesceMergesWordFrames(t *testing.T) {
 	info := coalescePolicy(false)
-	words := make([]string, 0, 64)
+	var words []string
 	var frames []string
+	// 首帧透传（SawPure 语义），其后缓冲至阈值
+	coalesceReasoningStreamFrame(info, wordFrame(" first"))
+	words = append(words, " first")
 	for i := 0; i < 64 && len(frames) == 0; i++ {
 		w := " word" + strings.Repeat("x", i%7)
 		words = append(words, w)
@@ -56,7 +95,7 @@ func TestReasoningCoalesceMergesWordFrames(t *testing.T) {
 	if len(frames) != 1 {
 		t.Fatalf("阈值到达时应冲刷出一帧, got %d 帧", len(frames))
 	}
-	if got := frameReasoning(t, frames[0]); got != strings.Join(words, "") {
+	if got := frameReasoning(t, frames[0]); got != strings.Join(words[1:], "") {
 		t.Fatalf("合并文本必须保序全量: got %q", got)
 	}
 	if !strings.Contains(frames[0], `"id":"34ccefde"`) || !strings.Contains(frames[0], `"model":"glm-5.3-flash"`) {
@@ -64,16 +103,16 @@ func TestReasoningCoalesceMergesWordFrames(t *testing.T) {
 	}
 }
 
-// 阈值未到时帧被吞掉（返回 0 帧）。
+// 阈值未到时帧被吞掉（返回 0 帧）；首帧透传不计入缓冲。
 func TestReasoningCoalesceSwallowsBelowThreshold(t *testing.T) {
 	info := coalescePolicy(false)
-	if frames := coalesceReasoningStreamFrame(info, wordFrame("The")); len(frames) != 0 {
-		t.Fatalf("小增量帧应被缓冲, got %v", frames)
+	if frames := coalesceReasoningStreamFrame(info, wordFrame("The")); len(frames) != 1 {
+		t.Fatalf("首帧必须透传, got %v", frames)
 	}
 	if frames := coalesceReasoningStreamFrame(info, wordFrame(" user")); len(frames) != 0 {
 		t.Fatalf("小增量帧应被缓冲, got %v", frames)
 	}
-	if !info.ReasoningCoalesce.Held || info.ReasoningCoalesce.Pending != "The user" {
+	if !info.ReasoningCoalesce.Held || info.ReasoningCoalesce.Pending != " user" {
 		t.Fatalf("缓冲状态不对: %+v", info.ReasoningCoalesce)
 	}
 }
@@ -97,12 +136,13 @@ func TestReasoningCoalesceFlushBeforeContent(t *testing.T) {
 	info := coalescePolicy(false)
 	coalesceReasoningStreamFrame(info, wordFrame("The"))
 	coalesceReasoningStreamFrame(info, wordFrame(" user"))
+	coalesceReasoningStreamFrame(info, wordFrame(" is"))
 	contentFrame := `{"choices":[{"index":0,"delta":{"content":"正文"},"finish_reason":null}]}`
 	frames := coalesceReasoningStreamFrame(info, contentFrame)
 	if len(frames) != 2 {
 		t.Fatalf("冲刷+透传应产出 2 帧, got %d", len(frames))
 	}
-	if got := frameReasoning(t, frames[0]); got != "The user" {
+	if got := frameReasoning(t, frames[0]); got != " user is" {
 		t.Fatalf("冲刷帧文本不对: %q", got)
 	}
 	if !strings.Contains(frames[1], `"content":"正文"`) {
@@ -124,12 +164,13 @@ func TestReasoningCoalesceFlushBeforeTerminalFrames(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			info := coalescePolicy(false)
-			coalesceReasoningStreamFrame(info, wordFrame("The"))
+			coalesceReasoningStreamFrame(info, wordFrame("The")) // 首帧透传
+			coalesceReasoningStreamFrame(info, wordFrame(" more"))
 			frames := coalesceReasoningStreamFrame(info, tc.frame)
 			if len(frames) != 2 {
 				t.Fatalf("应冲刷+透传 2 帧, got %d", len(frames))
 			}
-			if got := frameReasoning(t, frames[0]); got != "The" {
+			if got := frameReasoning(t, frames[0]); got != " more" {
 				t.Fatalf("冲刷文本不对: %q", got)
 			}
 			if frames[1] != tc.frame {
@@ -155,10 +196,14 @@ func TestReasoningCoalesceBigFramePassesImmediately(t *testing.T) {
 // takeReasoningFlushFrame 幂等复位：取走后再次取应为空。
 func TestTakeReasoningFlushFrameResets(t *testing.T) {
 	info := coalescePolicy(false)
-	coalesceReasoningStreamFrame(info, wordFrame("The"))
+	coalesceReasoningStreamFrame(info, wordFrame("The")) // 首帧透传
+	coalesceReasoningStreamFrame(info, wordFrame(" more"))
 	first := takeReasoningFlushFrame(info)
 	if first == "" {
 		t.Fatalf("有缓冲时必须返回合并帧")
+	}
+	if got := frameReasoning(t, first); got != " more" {
+		t.Fatalf("合并文本不对: %q", got)
 	}
 	if second := takeReasoningFlushFrame(info); second != "" {
 		t.Fatalf("取走后必须复位, got %q", second)
@@ -173,6 +218,9 @@ func TestTakeReasoningFlushFrameResets(t *testing.T) {
 func TestReasoningCoalesceMirrorReasoningKey(t *testing.T) {
 	info := coalescePolicy(false)
 	mirror := `{"id":"m1","model":"m","choices":[{"index":0,"delta":{"reasoning":"The"},"finish_reason":null}]}`
+	if frames := coalesceReasoningStreamFrame(info, mirror); len(frames) != 1 {
+		t.Fatalf("首帧必须透传, got %v", frames)
+	}
 	if frames := coalesceReasoningStreamFrame(info, mirror); len(frames) != 0 {
 		t.Fatalf("镜像键小帧应被缓冲, got %v", frames)
 	}
@@ -225,10 +273,11 @@ func TestReasoningCoalesceBypassesStatefulTransformers(t *testing.T) {
 // 无 reasoning 字样的帧走快速旁路：先冲刷再透传。
 func TestReasoningCoalesceFastPathFlushesFirst(t *testing.T) {
 	info := coalescePolicy(false)
-	coalesceReasoningStreamFrame(info, wordFrame("The"))
+	coalesceReasoningStreamFrame(info, wordFrame("The")) // 首帧透传
+	coalesceReasoningStreamFrame(info, wordFrame(" word"))
 	plain := `{"choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null}]}`
 	frames := coalesceReasoningStreamFrame(info, plain)
-	if len(frames) != 2 || frameReasoning(t, frames[0]) != "The" || frames[1] != plain {
+	if len(frames) != 2 || frameReasoning(t, frames[0]) != " word" || frames[1] != plain {
 		t.Fatalf("快速旁路必须先冲刷: %v", frames)
 	}
 }

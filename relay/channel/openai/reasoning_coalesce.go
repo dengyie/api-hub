@@ -56,6 +56,10 @@ func reasoningCoalesceEligible(info *relaycommon.RelayInfo) bool {
 // classifyReasoningFrame 判定一个 SSE 帧是否「纯 reasoning 增量帧」，并取出
 // 增量文本（GetReasoningContent 同款胜者语义：reasoning_content 非空优先，
 // 否则 reasoning）。pure=false 的帧一律冲刷后原样透传。
+//
+// role 与 reasoning 共存视为纯帧：生产上游（#118 cpa-yimingtalk 实测）在
+// 每个 delta 帧里都重复携带 "role":"assistant"，若把 role 当非纯载荷，逐词
+// 帧会全军旁路、合并失效。重复 role 本就是上游自己的帧形，客户端已兼容。
 func classifyReasoningFrame(data string) (reasoning string, pure bool) {
 	choices := gjson.Get(data, "choices")
 	if !choices.IsArray() {
@@ -81,8 +85,8 @@ func classifyReasoningFrame(data string) (reasoning string, pure bool) {
 		return "", false
 	}
 	for name := range delta.Map() {
-		if name != "reasoning_content" && name != "reasoning" {
-			// role / content / tool_calls / function_call / 其他任何键：
+		if name != "reasoning_content" && name != "reasoning" && name != "role" {
+			// content / tool_calls / function_call / 其他任何键：
 			// 都意味着这帧还承载了思考以外的东西
 			return "", false
 		}
@@ -114,6 +118,11 @@ func coalesceReasoningStreamFrame(info *relaycommon.RelayInfo, data string) []st
 		return flushFirst(info, data)
 	}
 	st := &info.ReasoningCoalesce
+	if !st.SawPure {
+		// 本尝试首个纯 reasoning 帧立即透传：保住客户端 TTFT 观感
+		st.SawPure = true
+		return []string{data}
+	}
 	st.Pending += reasoning
 	st.LastFrame = data
 	st.Held = true
