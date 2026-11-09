@@ -28,10 +28,15 @@ import (
 //
 // 设计约束：
 //   - 默认开启（无损），ChannelSettings.DisableReasoningCoalesce 按渠道豁免。
-//   - 只缓冲「纯 reasoning 增量帧」：带实义 content / tool_calls /
-//     finish_reason / usage / error / 多 choice 的帧先冲刷缓冲再原样下发，
-//     全程保序（role 与空占位键不算载荷，见 classifyReasoningFrame）。
+//   - 只缓冲「纯 reasoning 增量帧」：delta 里除 reasoning 载荷键外只允许
+//     role 与空占位（实测上游每帧重复 role、携带全量键空占位），任何实义
+//     载荷（content 文本、tool_calls 元素、标量值）、choice 级非空
+//     finish_reason、usage、error、多 choice 都先冲刷缓冲再原样下发，全程
+//     保序。
 //   - 阈值冲刷 + 终态冲刷（流正常结束、异常中断、HandleFinalResponse 前）。
+//   - 载荷载体统一：合并帧统一走 reasoning_content（镜像键折叠）；首个纯
+//     reasoning 帧立即透传保 TTFT，载体为镜像键时同样归一，整个流的思考
+//     载体对客户端一致。
 //   - 与逐帧状态机改写器互斥：ThinkTagToReasoning / ReasoningAsContent /
 //     ThinkingToContent 任一开启时整路旁路——那些状态机必须看到每一帧。
 //   - 信封复用：冲刷帧 = 最近一个被缓冲帧的原始字节仅改写 reasoning 字段，
@@ -42,8 +47,9 @@ import (
 const (
 	// reasoningCoalesceThreshold 字节；逐词帧 ~8-15B，约 20-40 词合并为一帧。
 	reasoningCoalesceThreshold = 256
-	// reasoningCoalesceStormFrames 单流扣压帧数告警阈值：正常逐词上游一次
-	// 长思考约吞 30-60 帧；超过该值基本可断定上游在逐词下发，值得归因记录。
+	// reasoningCoalesceStormFrames 单流扣压帧数告警阈值：生产实测逐词上游
+	// 一次长思考会吞 900+ 帧（#118 897、#56 946），短思考也有数十帧；超过
+	// 该值可断定上游在逐词下发，值得渠道归因记录。
 	reasoningCoalesceStormFrames = 200
 )
 
@@ -86,9 +92,10 @@ func isEmptyJSONPlaceholder(v gjson.Result) bool {
 	}
 }
 
-// classifyReasoningFrame 判定一个 SSE 帧是否「纯 reasoning 增量帧」，并取出
-// 增量文本（GetReasoningContent 同款胜者语义：reasoning_content 非空优先，
-// 否则 reasoning）。pure=false 的帧一律冲刷后原样透传。
+// classifyReasoningFrame 判定一个 SSE 帧是否「纯 reasoning 增量帧」，返回
+// （增量文本，是否纯帧，载荷是否走 reasoning 镜像键）。增量文本取
+// GetReasoningContent 同款胜者语义：reasoning_content 非空优先，否则
+// reasoning。pure=false 的帧一律冲刷后原样透传。
 //
 // 判定规则：除 reasoning 载荷键外，其余 delta 键必须是空占位或 role——
 // role 恒为帧形标记（生产上游每帧重复 "role":"assistant"），空占位不带
@@ -101,14 +108,14 @@ func isEmptyJSONPlaceholder(v gjson.Result) bool {
 //
 // 实现走 gjson 单趟遍历（ForEach + 数组计数路径），不构造中间 map/切片：
 // 该函数位于流式热路径，每个 reasoning 帧都会执行一次。
-func classifyReasoningFrame(data string) (reasoning string, pure bool) {
+func classifyReasoningFrame(data string) (reasoning string, pure bool, mirrorCarrier bool) {
 	// choices.# 取数组长度：缺失 / null / 非数组 / 多 choice 一律不缓冲
 	if n := gjson.Get(data, "choices.#"); !n.Exists() || n.Int() != 1 {
-		return "", false
+		return "", false, false
 	}
 	choice := gjson.Get(data, "choices.0")
 	if !choice.Exists() {
-		return "", false
+		return "", false, false
 	}
 	// finish_reason / usage / error 均为顶层键的简单路径匹配，不下钻嵌套
 	if fr := choice.Get("finish_reason"); fr.Exists() {
@@ -120,18 +127,18 @@ func classifyReasoningFrame(data string) (reasoning string, pure bool) {
 			terminated = true
 		}
 		if terminated {
-			return "", false
+			return "", false, false
 		}
 	}
 	if u := gjson.Get(data, "usage"); u.Exists() && u.Type != gjson.Null {
-		return "", false
+		return "", false, false
 	}
 	if e := gjson.Get(data, "error"); e.Exists() && e.Type != gjson.Null {
-		return "", false
+		return "", false, false
 	}
 	delta := choice.Get("delta")
 	if !delta.Exists() || !delta.IsObject() {
-		return "", false
+		return "", false, false
 	}
 	var rc, rs gjson.Result
 	pure = true
@@ -152,16 +159,16 @@ func classifyReasoningFrame(data string) (reasoning string, pure bool) {
 		return true
 	})
 	if !pure {
-		return "", false
+		return "", false, false
 	}
 	if rc.Type == gjson.String && rc.Str != "" {
-		return rc.Str, true
+		return rc.Str, true, false
 	}
 	if rs.Type == gjson.String && rs.Str != "" {
-		return rs.Str, true
+		return rs.Str, true, true
 	}
 	// 纯空壳（如 reasoning_content:null / ""）：无载荷可缓冲
-	return "", false
+	return "", false, false
 }
 
 // coalesceReasoningStreamFrame 是 HandleStreamFormat 的前置帧过滤器，返回
@@ -174,14 +181,22 @@ func coalesceReasoningStreamFrame(info *relaycommon.RelayInfo, data string) []st
 		// 快速旁路：帧里没有 reasoning 字样，冲刷缓冲后原样下发
 		return flushFirst(info, data)
 	}
-	reasoning, pure := classifyReasoningFrame(data)
+	reasoning, pure, mirrorCarrier := classifyReasoningFrame(data)
 	if !pure || reasoning == "" {
 		return flushFirst(info, data)
 	}
 	st := &info.ReasoningCoalesce
 	if !st.SawPure {
-		// 本尝试首个纯 reasoning 帧立即透传：保住客户端 TTFT 观感
+		// 本尝试首个纯 reasoning 帧立即透传：保住客户端 TTFT 观感。
+		// 镜像键归一：上游用 reasoning 承载载荷时，首帧也改写为
+		// reasoning_content——合并帧统一走 reasoning_content，首帧不做成
+		// 载体例外，严格单载体客户端不会丢首段。
 		st.SawPure = true
+		if mirrorCarrier {
+			if frame := rewriteHeldFrameReasoning(data, reasoning); frame != "" {
+				return []string{frame}
+			}
+		}
 		return []string{data}
 	}
 	st.Pending += reasoning

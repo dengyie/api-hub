@@ -315,3 +315,95 @@ func TestReasoningCoalesceFastPathFlushesFirst(t *testing.T) {
 		t.Fatalf("快速旁路必须先冲刷: %v", frames)
 	}
 }
+
+// 病理帧形表：每一行都是「保守拒绝=原样透传」的边界。任何一行变成 PURE
+// 都要警惕分类器被放松过头。
+func TestReasoningCoalescePathologicalFrames(t *testing.T) {
+	cases := []struct {
+		name  string
+		frame string
+	}{
+		{"choices as object", `{"choices":{"0":{"delta":{"reasoning_content":"x"}}}}`},
+		{"choices with null element", `{"choices":[null]}`},
+		{"choices two", `{"choices":[{"delta":{"reasoning_content":"a"}},{"delta":{"reasoning_content":"b"}}]}`},
+		{"reasoning_content bool", `{"choices":[{"delta":{"reasoning_content":true}}]}`},
+		{"reasoning_content number", `{"choices":[{"delta":{"reasoning_content":123}}]}`},
+		{"delta-level finish_reason", `{"choices":[{"delta":{"reasoning_content":"x","finish_reason":"stop"}}]}`},
+		{"usage empty object", `{"choices":[{"delta":{"reasoning_content":"x"}}],"usage":{}}`},
+		{"empty delta", `{"choices":[{"delta":{}}]}`},
+		{"missing delta", `{"choices":[{"index":0}]}`},
+		{"numeric payload key", `{"choices":[{"delta":{"reasoning_content":"x","confidence":0.9}}]}`},
+		{"boolean payload key", `{"choices":[{"delta":{"reasoning_content":"x","streamed":false}}]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			info := coalescePolicy(false)
+			info.ReasoningCoalesce.SawPure = true // 跳过首帧透传，直测缓冲判定
+			if reasoning, pure, _ := classifyReasoningFrame(tc.frame); pure && reasoning != "" {
+				t.Fatalf("病理帧必须被拒绝透传, got pure reasoning=%q", reasoning)
+			}
+		})
+	}
+}
+
+// 多段思考交错（思考→正文→思考→终止）：首段随首帧透传，次段缓冲到终帧
+// 冲刷，全程保序且两段文本各自完整。
+func TestReasoningCoalesceInterleavedSegments(t *testing.T) {
+	info := coalescePolicy(false)
+	var out []string
+	feed := func(frame string) { out = append(out, coalesceReasoningStreamFrame(info, frame)...) }
+	word := func(w string) string {
+		return `{"choices":[{"index":0,"delta":{"reasoning_content":"` + w + `"},"finish_reason":null}]}`
+	}
+	cont := func(s string) string {
+		return `{"choices":[{"index":0,"delta":{"content":"` + s + `"},"finish_reason":null}]}`
+	}
+	feed(word(strings.Repeat("a", 200))) // 首帧透传
+	feed(cont("ANSWER1"))                // 无缓冲，直接透传
+	feed(word(strings.Repeat("b", 200))) // 次段缓冲
+	feed(`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`)
+
+	if len(out) != 4 {
+		t.Fatalf("期望 4 帧 (透传+content+冲刷+finish), got %d: %s", len(out), strings.Join(out, "|"))
+	}
+	if !strings.Contains(out[0], strings.Repeat("a", 200)) {
+		t.Fatalf("首段必须随首帧透传: %s", out[0])
+	}
+	if !strings.Contains(out[1], "ANSWER1") {
+		t.Fatalf("content 必须原样透传: %s", out[1])
+	}
+	if !strings.Contains(out[2], strings.Repeat("b", 200)) {
+		t.Fatalf("次段必须随终帧前冲刷完整下发: %s", out[2])
+	}
+	if !strings.Contains(out[3], `"finish_reason":"stop"`) {
+		t.Fatalf("终帧必须原样透传: %s", out[3])
+	}
+}
+
+// 首帧载体归一：上游用 reasoning 镜像键承载载荷时，首个纯 reasoning 帧
+// 透传前改写为 reasoning_content，使整个流的思考载体对客户端一致
+// （合并帧统一 reasoning_content，首帧不做成载体例外）。
+func TestReasoningCoalesceFirstMirrorFrameNormalized(t *testing.T) {
+	info := coalescePolicy(false)
+	mirror := func(w string) string {
+		return `{"id":"m1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","reasoning":"` + w + `"},"finish_reason":""}]}`
+	}
+	frames := coalesceReasoningStreamFrame(info, mirror("The"))
+	if len(frames) != 1 {
+		t.Fatalf("首帧必须透传, got %d 帧", len(frames))
+	}
+	if strings.Contains(frames[0], `"reasoning":`) {
+		t.Fatalf("首帧镜像键必须归一为 reasoning_content: %s", frames[0])
+	}
+	if got := frameReasoning(t, frames[0]); got != "The" {
+		t.Fatalf("归一后文本必须原样: %q", got)
+	}
+	// 次帧正常缓冲，合并仍走 reasoning_content
+	if frames := coalesceReasoningStreamFrame(info, mirror(" more")); len(frames) != 0 {
+		t.Fatalf("次帧应被缓冲, got %v", frames)
+	}
+	flushed := takeReasoningFlushFrame(info)
+	if got := frameReasoning(t, flushed); got != " more" {
+		t.Fatalf("合并文本不对: %q", got)
+	}
+}

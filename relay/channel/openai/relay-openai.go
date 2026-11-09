@@ -90,8 +90,10 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 		//
 		// 断流前尽力冲刷 reasoning 微帧缓冲：缓冲里是已从上游收到、但还没下发
 		// 的思考增量，扣掉等于客户端看到的思考缺尾巴。写失败静默忽略（写通道
-		// 可能已死）。
+		// 可能已死）。断流同样输出合并摘要/帧风暴告警——上游中途断流不影响
+		// 「它是不是逐词上游」这个事实。
 		_ = writeCoalescedFlush(c, info, info != nil && info.ChannelSetting.ForceFormat, info != nil && info.ChannelSetting.ThinkingToContent)
+		logReasoningCoalesceSummary(c, info)
 		interrupted := service.InterruptedTextUsage(c, info, responseTextBuilder.String())
 		if interrupted != nil {
 			interrupted.CompletionTokens += toolCount * 7

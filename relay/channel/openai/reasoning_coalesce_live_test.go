@@ -184,7 +184,7 @@ func BenchmarkClassifyReasoningFrame(b *testing.B) {
 	frame := `{"id":"a5ceec1f2b4e41d3a0a65f29b48422bc","model":"glm-5.3-flash","object":"chat.completion.chunk","created":1794249637,"choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" existing","function_call":null,"refusal":"","tool_calls":[],"extra_fields":null},"logprobs":null,"finish_reason":""}],"usage":null}`
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, pure := classifyReasoningFrame(frame); !pure {
+		if _, pure, _ := classifyReasoningFrame(frame); !pure {
 			b.Fatal("生产帧必须判为纯 reasoning 帧")
 		}
 	}
