@@ -53,13 +53,36 @@ func reasoningCoalesceEligible(info *relaycommon.RelayInfo) bool {
 	return true
 }
 
+// isEmptyJSONPlaceholder 判定一个 JSON 值是否为空占位（null / "" / [] / {}）。
+// 逐词上游在每个 delta 帧里携带全量键的空占位（#118 实测帧形：delta 同时带
+// function_call:null + refusal:"" + tool_calls:[] + extra_fields:null），
+// 占位不是载荷，不得作为旁路合并的理由。
+func isEmptyJSONPlaceholder(v gjson.Result) bool {
+	switch v.Type {
+	case gjson.Null:
+		return true
+	case gjson.String:
+		return v.Str == ""
+	case gjson.JSON:
+		switch strings.TrimSpace(v.Raw) {
+		case "[]", "{}", "null":
+			return true
+		}
+		return false
+	default:
+		// False / Number 等实义标量按载荷处理（保守拒绝）
+		return false
+	}
+}
+
 // classifyReasoningFrame 判定一个 SSE 帧是否「纯 reasoning 增量帧」，并取出
 // 增量文本（GetReasoningContent 同款胜者语义：reasoning_content 非空优先，
 // 否则 reasoning）。pure=false 的帧一律冲刷后原样透传。
 //
-// role 与 reasoning 共存视为纯帧：生产上游（#118 cpa-yimingtalk 实测）在
-// 每个 delta 帧里都重复携带 "role":"assistant"，若把 role 当非纯载荷，逐词
-// 帧会全军旁路、合并失效。重复 role 本就是上游自己的帧形，客户端已兼容。
+// 判定规则：除 reasoning 载荷键外，其余 delta 键必须是空占位或 role——
+// role 恒为帧形标记（生产上游每帧重复 "role":"assistant"），空占位不带
+// 载荷；任何实义载荷（content 文本、tool_calls 元素、数字/布尔标量）都
+// 意味着这帧还承载了思考以外的东西。
 func classifyReasoningFrame(data string) (reasoning string, pure bool) {
 	choices := gjson.Get(data, "choices")
 	if !choices.IsArray() {
@@ -84,10 +107,11 @@ func classifyReasoningFrame(data string) (reasoning string, pure bool) {
 	if !delta.Exists() || !delta.IsObject() {
 		return "", false
 	}
-	for name := range delta.Map() {
-		if name != "reasoning_content" && name != "reasoning" && name != "role" {
-			// content / tool_calls / function_call / 其他任何键：
-			// 都意味着这帧还承载了思考以外的东西
+	for name, val := range delta.Map() {
+		if name == "reasoning_content" || name == "reasoning" || name == "role" {
+			continue
+		}
+		if !isEmptyJSONPlaceholder(val) {
 			return "", false
 		}
 	}

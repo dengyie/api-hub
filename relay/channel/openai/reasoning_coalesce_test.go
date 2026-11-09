@@ -270,6 +270,34 @@ func TestReasoningCoalesceBypassesStatefulTransformers(t *testing.T) {
 	}
 }
 
+// 生产回归（2026-11-10 渠道 #118 第二次实测）：delta 携带全量键的空占位
+// （function_call:null / refusal:"" / tool_calls:[] / extra_fields:null），
+// 占位不得作为旁路合并的理由；带真实载荷的键（content 文本）仍然旁路。
+func TestReasoningCoalescePlaceholderKeysBuffered(t *testing.T) {
+	info := coalescePolicy(false)
+	placeholderFrame := func(word string) string {
+		return `{"id":"8ae31877","model":"glm-5.3-flash","object":"chat.completion.chunk","created":1794247339,"usage":null,"choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"` + word + `","function_call":null,"refusal":"","tool_calls":[],"extra_fields":null},"finish_reason":null,"logprobs":null}]}`
+	}
+	if frames := coalesceReasoningStreamFrame(info, placeholderFrame("Common")); len(frames) != 1 {
+		t.Fatalf("首帧必须透传, got %v", frames)
+	}
+	if frames := coalesceReasoningStreamFrame(info, placeholderFrame(" trap")); len(frames) != 0 {
+		t.Fatalf("占位键逐词帧应被缓冲, got %v", frames)
+	}
+	// content 带实义载荷：冲刷缓冲后原样透传
+	contentFrame := `{"choices":[{"index":0,"delta":{"role":"assistant","content":"：","function_call":null,"refusal":"","tool_calls":[],"extra_fields":null},"finish_reason":null}]}`
+	frames := coalesceReasoningStreamFrame(info, contentFrame)
+	if len(frames) != 2 {
+		t.Fatalf("应冲刷+透传 2 帧, got %d", len(frames))
+	}
+	if got := frameReasoning(t, frames[0]); got != " trap" {
+		t.Fatalf("冲刷文本不对: %q", got)
+	}
+	if !strings.Contains(frames[1], `"content":"："`) {
+		t.Fatalf("content 帧必须原样透传: %s", frames[1])
+	}
+}
+
 // 无 reasoning 字样的帧走快速旁路：先冲刷再透传。
 func TestReasoningCoalesceFastPathFlushesFirst(t *testing.T) {
 	info := coalescePolicy(false)
