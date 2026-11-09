@@ -94,8 +94,20 @@ func classifyReasoningFrame(data string) (reasoning string, pure bool) {
 		return "", false
 	}
 	choice := arr[0]
-	if fr := gjson.Get(choice.Raw, "finish_reason"); fr.Exists() && fr.Type != gjson.Null {
-		return "", false
+	// finish_reason 三种合法形态都算「未终止」：键缺失 / null / 空串——
+	// 部分上游（#118 实测）用 "finish_reason":"" 表示进行中，只有非空串
+	// （"stop"/"length"/…）才是真实终态。非空字符串或其它实义值按终止帧处理。
+	if fr := gjson.Get(choice.Raw, "finish_reason"); fr.Exists() {
+		terminated := false
+		switch {
+		case fr.Type == gjson.Null:
+		case fr.Type == gjson.String && fr.Str == "":
+		default:
+			terminated = true
+		}
+		if terminated {
+			return "", false
+		}
 	}
 	if u := gjson.Get(data, "usage"); u.Exists() && u.Type != gjson.Null {
 		return "", false
