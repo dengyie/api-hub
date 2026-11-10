@@ -21,6 +21,7 @@ import {
   useEffect,
   useEffectEvent,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -224,7 +225,7 @@ export function ModelMappingEditor(props: ModelMappingEditorProps) {
     input.focus()
   })
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     focusPendingRow()
   }, [rows])
 
