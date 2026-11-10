@@ -288,6 +288,7 @@ var builtinBillingExpr = map[string]string{
 	"codex-auto-review":           `tier("standard", p * 1.75 + c * 14 + cr * 0.175)`,
 	"hy3":                         `tier("standard", p * 0.5 + c * 1.5)`,
 	"hy3-x":                       `tier("standard", p * 0.5 + c * 1.5)`,
+	"hy4":                         `tier("standard", p * 0.8 + c * 2.4)`,
 	"hy4std":                      `tier("standard", p * 0.8 + c * 2.4)`,
 	"step-5-preview":              `tier("standard", p * 1.5 + c * 6.0 + cr * 0.15)`,
 	"auto":                        `tier("standard", p * 1.0 + c * 3.2)`,

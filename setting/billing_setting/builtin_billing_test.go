@@ -205,6 +205,7 @@ func TestMagpieGatewayModelsAreAllPriced(t *testing.T) {
 		"deepseek-v4.1-flash-sg",
 		"glm-5-turbo",
 		"hy3-x",
+		"hy4",
 		"hy4std",
 		"hy4free",
 		"kimi-k2.8-preview",
