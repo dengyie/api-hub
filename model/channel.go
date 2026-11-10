@@ -1478,6 +1478,9 @@ func (channel *Channel) ValidateSettings() error {
 	if err := channelParams.ValidateHTTPTransport(); err != nil {
 		return err
 	}
+	if err := channelParams.ValidateFingerprint(); err != nil {
+		return err
+	}
 	if err := channelParams.ValidateTimeouts(); err != nil {
 		return err
 	}

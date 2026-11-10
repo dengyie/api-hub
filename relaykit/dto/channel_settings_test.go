@@ -772,3 +772,20 @@ func TestChannelSettingsTimeoutsJSONRoundTripAndValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateFingerprint(t *testing.T) {
+	for _, mode := range []string{"", "auto", "codex", "claude", "off"} {
+		t.Run("valid "+mode, func(t *testing.T) {
+			require.NoError(t, (*ChannelSettings)(nil).ValidateFingerprint())
+			require.NoError(t, (&ChannelSettings{ClientFingerprint: mode}).ValidateFingerprint())
+		})
+	}
+
+	for _, mode := range []string{"codex_cli", "claude-code", "CODEX", "sdk", "off "} {
+		t.Run("invalid "+mode, func(t *testing.T) {
+			err := (&ChannelSettings{ClientFingerprint: mode}).ValidateFingerprint()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "client_fingerprint")
+		})
+	}
+}

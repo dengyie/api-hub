@@ -2638,7 +2638,7 @@
     "footer.columns.related.links.oneApi": "One API",
     "footer.columns.related.title": "相關項目",
     "footer.defaultCopyright": "版權所有。",
-    "footer.new\u0061pi.projectAttributionSuffix": "版權所有，由項目貢獻者設計與開發。",
+    "footer.newapi.projectAttributionSuffix": "版權所有，由項目貢獻者設計與開發。",
     "For advanced custom channels this applies only to /v1/responses routes without protocol conversion.": "進階自訂渠道僅對 /v1/responses 且不做協定轉換的路由生效。",
     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "對於 2025 年 5 月 10 日之後新增的渠道，在部署時無需從模型名稱中移除 \".\"",
     "For private deployments, format: https://fastgpt.run/api/openapi": "對於私有部署，格式為：https://fastgpt.run/api/openapi",
@@ -6921,6 +6921,11 @@
     "Measured from requests in the last 24 hours": "根據最近 24 小時的請求統計",
     "Model funding": "模型資助",
     "Sponsored": "贊助",
-    "Self-hosted": "自建"
+    "Self-hosted": "自建",
+    "Client Disguise": "用戶端偽裝",
+    "Present upstream requests as Codex CLI or Claude Code; useful when the upstream gates every model by client fingerprint": "把送往上游的請求偽裝成 Codex CLI 或 Claude Code；上游按用戶端指紋攔截所有模型時使用（如 hiyo）",
+    "Codex CLI": "Codex CLI",
+    "Claude Code": "Claude Code",
+    "Off (bare client)": "關閉（裸用戶端）"
   }
 }

@@ -87,6 +87,8 @@ export interface ChannelSettings {
   proxy?: string
   pass_through_body_enabled?: boolean
   responses_websocket_enabled?: boolean
+  /** Per-channel client disguise: auto (legacy heuristics) / codex / claude / off */
+  client_fingerprint?: string
   system_prompt?: string
   system_prompt_override?: boolean
   http_protocol?: 'auto' | 'http1' | string

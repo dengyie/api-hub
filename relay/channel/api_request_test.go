@@ -14,6 +14,7 @@ import (
 	"github.com/dengyie/apihub/loadbalancer"
 	relaycommon "github.com/dengyie/apihub/relay/common"
 	relayconstant "github.com/dengyie/apihub/relay/constant"
+	"github.com/dengyie/apihub/relaykit/dto"
 	"github.com/dengyie/apihub/relaykit/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -601,6 +602,7 @@ func TestApplyUpstreamClientFingerprint(t *testing.T) {
 		model            string
 		relayFormat      types.RelayFormat
 		finalRelayFormat types.RelayFormat
+		fingerprint      string
 		clientHeaders    map[string]string
 		upstreamPreset   map[string]string
 		want             map[string]string
@@ -809,6 +811,84 @@ func TestApplyUpstreamClientFingerprint(t *testing.T) {
 			},
 			wantAbsent: []string{"x-opencode-session"},
 		},
+		{
+			name:        "forced codex disguise applies to non gpt models on openai channels",
+			channelType: constant.ChannelTypeOpenAI,
+			model:       "deepseek-v4.1-flash",
+			fingerprint: dto.ClientFingerprintCodex,
+			clientHeaders: map[string]string{
+				"User-Agent": "OpenAI/Python 1.99.0",
+			},
+			want: map[string]string{
+				"User-Agent":            codexFingerprintUserAgent,
+				"originator":            codexFingerprintOriginator,
+				"OpenAI-Beta":           codexFingerprintOpenAIBeta,
+				"X-Codex-Beta-Features": codexFingerprintBetaFeatures,
+				"session_id":            UserSessionUUID(7),
+			},
+			wantAbsent: []string{"x-opencode-session"},
+		},
+		{
+			name:        "forced codex disguise applies on anthropic channels too",
+			channelType: constant.ChannelTypeAnthropic,
+			model:       "deepseek-v4.1-flash",
+			fingerprint: dto.ClientFingerprintCodex,
+			clientHeaders: map[string]string{
+				"User-Agent": "curl/8.7.1",
+			},
+			want: map[string]string{
+				"User-Agent": codexFingerprintUserAgent,
+				"originator": codexFingerprintOriginator,
+			},
+			wantAbsent: []string{"x-opencode-session", "anthropic-client-platform"},
+		},
+		{
+			name:          "fingerprint off disables all disguise on gpt models",
+			channelType:   constant.ChannelTypeOpenAI,
+			model:         "gpt-5.5",
+			fingerprint:   dto.ClientFingerprintOff,
+			clientHeaders: map[string]string{"User-Agent": "OpenAI/Python 1.99.0"},
+			want:          map[string]string{"x-opencode-session": UserSessionUUID(7)},
+			wantAbsent:    []string{"originator", "OpenAI-Beta", "X-Codex-Beta-Features"},
+		},
+		{
+			name:          "fingerprint off disables claude fingerprint on anthropic channels",
+			channelType:   constant.ChannelTypeAnthropic,
+			model:         "claude-sonnet-5",
+			fingerprint:   dto.ClientFingerprintOff,
+			relayFormat:   types.RelayFormatClaude,
+			clientHeaders: map[string]string{"User-Agent": "curl/8.7.1"},
+			want:          map[string]string{"x-opencode-session": UserSessionUUID(7)},
+			wantAbsent:    []string{"anthropic-client-platform", "anthropic-version", "User-Agent"},
+		},
+		{
+			name:             "forced claude disguise applies to openai channel with claude envelope",
+			channelType:      constant.ChannelTypeOpenAI,
+			model:            "claude-sonnet-4",
+			fingerprint:      dto.ClientFingerprintClaude,
+			relayFormat:      types.RelayFormatClaude,
+			finalRelayFormat: types.RelayFormatClaude,
+			clientHeaders:    map[string]string{"User-Agent": "curl/8.7.1"},
+			want: map[string]string{
+				"User-Agent":                claudeFingerprintUserAgent,
+				"anthropic-client-platform": claudeFingerprintClientPlatform,
+				"anthropic-version":         constant.AnthropicVersionDefault,
+				"X-Session-UUID":            UserSessionUUID(7),
+			},
+			wantPresent: []string{"X-Client-Request-Id"},
+			wantAbsent:  []string{"x-opencode-session", "originator"},
+		},
+		{
+			name:        "auto mode keeps legacy behavior for non gpt models",
+			channelType: constant.ChannelTypeOpenAI,
+			model:       "deepseek-v4.1-flash",
+			fingerprint: dto.ClientFingerprintAuto,
+			clientHeaders: map[string]string{
+				"User-Agent": "OpenAI/Python 1.99.0",
+			},
+			want:           map[string]string{"x-opencode-session": UserSessionUUID(7)},
+			wantAbsent: []string{"originator"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -827,7 +907,11 @@ func TestApplyUpstreamClientFingerprint(t *testing.T) {
 				OriginModelName:         tt.model,
 				RelayFormat:             tt.relayFormat,
 				FinalRequestRelayFormat: tt.finalRelayFormat,
-				ChannelMeta:             &relaycommon.ChannelMeta{ChannelType: tt.channelType, ChannelBaseUrl: tt.channelBaseURL},
+				ChannelMeta: &relaycommon.ChannelMeta{
+					ChannelType:     tt.channelType,
+					ChannelBaseUrl:  tt.channelBaseURL,
+					ChannelSetting:  dto.ChannelSettings{ClientFingerprint: tt.fingerprint},
+				},
 			}
 
 			applyUpstreamClientFingerprint(c, info, req)

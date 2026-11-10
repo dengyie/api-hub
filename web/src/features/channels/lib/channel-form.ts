@@ -110,6 +110,23 @@ export function normalizeHttp2ConnectionShards(
   return value
 }
 
+export const CLIENT_FINGERPRINT_MODES = [
+  'auto',
+  'codex',
+  'claude',
+  'off',
+] as const
+export type ClientFingerprintMode = (typeof CLIENT_FINGERPRINT_MODES)[number]
+
+export function isClientFingerprintMode(
+  value: unknown
+): value is ClientFingerprintMode {
+  return (
+    typeof value === 'string' &&
+    (CLIENT_FINGERPRINT_MODES as readonly string[]).includes(value)
+  )
+}
+
 function parseOptionalJson(value: string | undefined): unknown {
   if (!value?.trim()) return undefined
   return JSON.parse(value)
@@ -289,6 +306,7 @@ export const channelFormSchema = z
     header_timeout_ms: channelTimeoutSchema.optional(),
     pass_through_body_enabled: z.boolean().optional(),
     responses_websocket_enabled: z.boolean().optional(),
+    client_fingerprint: z.enum(['auto', 'codex', 'claude', 'off']).optional(),
     system_prompt: z.string().optional(),
     system_prompt_override: z.boolean().optional(),
     // Type-specific settings (stored in settings JSON)
@@ -483,6 +501,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   header_timeout_ms: undefined,
   pass_through_body_enabled: false,
   responses_websocket_enabled: false,
+  client_fingerprint: 'auto',
   system_prompt: '',
   system_prompt_override: false,
   // Type-specific settings
@@ -530,6 +549,7 @@ export function transformChannelToFormDefaults(
     header_timeout_ms: undefined as number | undefined,
     pass_through_body_enabled: false,
     responses_websocket_enabled: false,
+    client_fingerprint: 'auto' as ClientFingerprintMode,
     system_prompt: '',
     system_prompt_override: false,
   }
@@ -561,6 +581,9 @@ export function transformChannelToFormDefaults(
         pass_through_body_enabled: parsed.pass_through_body_enabled || false,
         responses_websocket_enabled:
           parsed.responses_websocket_enabled === true,
+        client_fingerprint: isClientFingerprintMode(parsed.client_fingerprint)
+          ? parsed.client_fingerprint
+          : 'auto',
         system_prompt: parsed.system_prompt || '',
         system_prompt_override: parsed.system_prompt_override || false,
       }
@@ -695,6 +718,12 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
     responses_websocket_enabled:
       supportsResponsesWebSocket(formData.type) &&
       formData.responses_websocket_enabled === true,
+    // 客户端伪装：auto/空不写键，保持未改动渠道 JSON 字节等价。
+    client_fingerprint:
+      formData.client_fingerprint &&
+      formData.client_fingerprint !== 'auto'
+        ? formData.client_fingerprint
+        : undefined,
     system_prompt: formData.system_prompt || '',
     system_prompt_override: formData.system_prompt_override || false,
   }

@@ -2630,7 +2630,7 @@
     "footer.columns.related.links.oneApi": "Один API",
     "footer.columns.related.title": "Связанные проекты",
     "footer.defaultCopyright": "Все права защищены.",
-    "footer.new\u0061pi.projectAttributionSuffix": "Все права защищены. Разработано участниками проекта.",
+    "footer.newapi.projectAttributionSuffix": "Все права защищены. Разработано участниками проекта.",
     "For advanced custom channels this applies only to /v1/responses routes without protocol conversion.": "Для расширенных пользовательских каналов это действует только для маршрутов /v1/responses без преобразования протокола.",
     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "Для каналов, добавленных после 10 мая 2025 г., не нужно удалять \".\" из имён моделей при развёртывании",
     "For private deployments, format: https://fastgpt.run/api/openapi": "Для частных развертываний, формат: https://fastgpt.run/api/openapi",
@@ -6907,6 +6907,11 @@
     "Measured from requests in the last 24 hours": "По запросам за последние 24 часа",
     "Model funding": "Финансирование модели",
     "Sponsored": "Спонсируемая",
-    "Self-hosted": "На своём сервере"
+    "Self-hosted": "На своём сервере",
+    "Client Disguise": "Маскировка клиента",
+    "Present upstream requests as Codex CLI or Claude Code; useful when the upstream gates every model by client fingerprint": "Представляет запросы к апстриму как Codex CLI или Claude Code; полезно, когда апстрим фильтрует все модели по отпечатку клиента",
+    "Codex CLI": "Codex CLI",
+    "Claude Code": "Claude Code",
+    "Off (bare client)": "Выкл. (голый клиент)"
   }
 }

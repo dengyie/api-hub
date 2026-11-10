@@ -66,6 +66,24 @@ type ChannelSettings struct {
 	// /v1/systemone (object state serialized into the string Bivia requires;
 	// answers come back in the same Shape-1 format, so clients see one
 	// protocol either way).
+	// ClientFingerprint forces the upstream client disguise for this channel,
+	// overriding the automatic heuristics in relay/channel/upstream_fingerprint.go:
+	// "" / "auto" = automatic (codex fingerprint on type=1 gpt-* models, claude
+	// fingerprint on claude-envelope Anthropic/coding-plan channels — unchanged
+	// legacy behavior), "codex" = always present the request as Codex CLI on
+	// every model and channel type (e.g. free.hiyo.top runs a client gate on
+	// ALL models — non-gpt models would otherwise receive a silent HTTP 200
+	// block page 「本站仅限主流 Coding 客户端/CLI 使用…」), "claude" = always
+	// present as Claude Code on claude-envelope paths, "off" = never fill any
+	// fingerprint. Fill-only in all modes: header_override and genuine client
+	// fingerprint headers still win.
+	ClientFingerprint string `json:"client_fingerprint,omitempty"`
+	// SystemOneFlavor selects the upstream dialect for type-65 jev channels:
+	// "" (default) = native System One passthrough (TypeSafe / FuturePPO /
+	// MindsHub), "bivia" = translate the jev envelope onto Articul8 Bivia's
+	// /v1/systemone (object state serialized into the string Bivia requires;
+	// answers come back in the same Shape-1 format, so clients see one
+	// protocol either way).
 	SystemOneFlavor           string `json:"systemone_flavor,omitempty"`
 	Proxy                     string `json:"proxy"`
 	PassThroughBodyEnabled    bool   `json:"pass_through_body_enabled,omitempty"`
@@ -161,6 +179,28 @@ const (
 	HTTPProtocolHTTP1        = "http1"
 	MaxHTTP2ConnectionShards = 8
 )
+
+// Client fingerprint disguise modes (setting JSON key client_fingerprint).
+const (
+	ClientFingerprintAuto   = "auto"
+	ClientFingerprintCodex  = "codex"
+	ClientFingerprintClaude = "claude"
+	ClientFingerprintOff    = "off"
+)
+
+// ValidateFingerprint validates the save-time client_fingerprint channel
+// setting. Empty and "auto" both mean the legacy automatic heuristics.
+func (s *ChannelSettings) ValidateFingerprint() error {
+	if s == nil {
+		return nil
+	}
+	switch s.ClientFingerprint {
+	case "", ClientFingerprintAuto, ClientFingerprintCodex, ClientFingerprintClaude, ClientFingerprintOff:
+		return nil
+	default:
+		return fmt.Errorf("invalid client_fingerprint: %s (allowed: auto, codex, claude, off)", s.ClientFingerprint)
+	}
+}
 
 // ValidateHTTPTransport validates save-time HTTP transport channel settings.
 func (s *ChannelSettings) ValidateHTTPTransport() error {

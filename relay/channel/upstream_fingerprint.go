@@ -8,6 +8,7 @@ import (
 
 	"github.com/dengyie/apihub/constant"
 	"github.com/dengyie/apihub/relay/common"
+	"github.com/dengyie/apihub/relaykit/dto"
 	"github.com/dengyie/apihub/relaykit/types"
 	"github.com/dengyie/apihub/setting/operation_setting"
 
@@ -45,8 +46,30 @@ const (
 // 官方 UA 校验正则（伪装规范同款）：claude-cli/<ver> (...) 或 claude-code/<ver> (...)。
 var claudeCodeClientUARegex = regexp.MustCompile(`(?i)^claude-(?:cli|code)/\S+ \(`)
 
+// channelFingerprintMode resolves the per-channel client disguise switch
+// (setting JSON key client_fingerprint): "codex"/"claude" force the respective
+// disguise, "off" disables all fingerprint filling, ""/"auto" (and any unset
+// channel) fall through to the automatic heuristics below. Validation happens
+// at save time (dto.ChannelSettings.ValidateFingerprint), so unknown values
+// degrade to auto.
+func channelFingerprintMode(info *common.RelayInfo) string {
+	if info == nil || info.ChannelMeta == nil {
+		return ""
+	}
+	return info.ChannelMeta.ChannelSetting.ClientFingerprint
+}
+
 // usesCodexFingerprint reports whether the upstream request must look like a Codex CLI request.
 func usesCodexFingerprint(info *common.RelayInfo) bool {
+	switch channelFingerprintMode(info) {
+	case dto.ClientFingerprintCodex:
+		// Per-channel forced disguise: every model on this channel presents as
+		// Codex CLI, regardless of channel type or model name (e.g. hiyo's
+		// client gate covers deepseek/glm models too).
+		return true
+	case dto.ClientFingerprintOff, dto.ClientFingerprintClaude:
+		return false
+	}
 	if info == nil || info.ChannelMeta == nil || info.ChannelType != constant.ChannelTypeOpenAI {
 		return false
 	}
@@ -81,8 +104,17 @@ func usesClaudeFingerprint(info *common.RelayInfo) bool {
 	if info == nil || info.ChannelMeta == nil {
 		return false
 	}
+	if channelFingerprintMode(info) == dto.ClientFingerprintOff {
+		return false
+	}
 	if info.GetFinalRequestRelayFormat() != types.RelayFormatClaude {
 		return false
+	}
+	// Per-channel forced disguise: any channel whose final upstream envelope is
+	// claude presents as Claude Code, even outside the type-14 / special-base
+	// whitelist below.
+	if channelFingerprintMode(info) == dto.ClientFingerprintClaude {
+		return true
 	}
 	if info.ChannelType == constant.ChannelTypeAnthropic {
 		return true

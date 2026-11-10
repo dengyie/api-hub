@@ -22,6 +22,13 @@ import { useTranslation } from 'react-i18next'
 
 import { FieldGroup } from '@/components/ui/field'
 import { Label } from '@/components/ui/label'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { SettingsSwitchField } from '@/features/system-settings/components/settings-form-layout'
 import { ChannelHealthSource } from '@/features/system-settings/request-policies/related-policy-link'
@@ -62,6 +69,8 @@ type QuickOption = {
   checked: boolean
   onCheckedChange: (value: boolean) => void
   disabled: boolean
+  /** Optional compact control rendered next to the switch (e.g. the disguise mode selector). */
+  trailing?: ReactNode
 }
 
 export function ChannelQuickOptions(props: ChannelQuickOptionsProps) {
@@ -69,7 +78,7 @@ export function ChannelQuickOptions(props: ChannelQuickOptionsProps) {
   const id = useId()
   const formContext = useFormContext<ChannelFormValues>()
   const form = props.form ?? formContext
-  const [passthrough, headerOverride, autoBan, modelCheck, websocket] =
+  const [passthrough, headerOverride, autoBan, modelCheck, websocket, clientFingerprint] =
     useWatch({
       control: form.control,
       name: [
@@ -78,6 +87,7 @@ export function ChannelQuickOptions(props: ChannelQuickOptionsProps) {
         'auto_ban',
         'upstream_model_update_check_enabled',
         'responses_websocket_enabled',
+        'client_fingerprint',
       ],
     })
   const sensitiveDisabled = props.sensitiveLocked || props.disabled
@@ -152,6 +162,50 @@ export function ChannelQuickOptions(props: ChannelQuickOptionsProps) {
       }),
     disabled: props.disabled,
   })
+  // Client disguise: force the channel's upstream requests to present as
+  // Codex CLI or Claude Code regardless of model/channel type (e.g. hiyo's
+  // client gate covers every model). Switch off = auto (legacy heuristics).
+  const knownModes = ['codex', 'claude', 'off'] as const
+  const fingerprintMode: 'auto' | 'codex' | 'claude' | 'off' =
+    knownModes.includes(clientFingerprint as (typeof knownModes)[number])
+      ? (clientFingerprint as (typeof knownModes)[number])
+      : 'auto'
+  options.push({
+    key: 'client-disguise',
+    label: t('Client Disguise'),
+    description: t(
+      'Present upstream requests as Codex CLI or Claude Code; useful when the upstream gates every model by client fingerprint'
+    ),
+    checked: fingerprintMode === 'codex' || fingerprintMode === 'claude',
+    onCheckedChange: (value) =>
+      form.setValue('client_fingerprint', value ? 'codex' : 'auto', {
+        shouldDirty: true,
+        shouldValidate: true,
+      }),
+    disabled: props.disabled,
+    trailing:
+      fingerprintMode !== 'auto' ? (
+        <Select
+          value={fingerprintMode}
+          onValueChange={(mode) =>
+            form.setValue(
+              'client_fingerprint',
+              mode as 'codex' | 'claude' | 'off',
+              { shouldDirty: true, shouldValidate: true }
+            )
+          }
+        >
+          <SelectTrigger size='sm' className='h-7 w-[120px] text-xs'>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value='codex'>{t('Codex CLI')}</SelectItem>
+            <SelectItem value='claude'>{t('Claude Code')}</SelectItem>
+            <SelectItem value='off'>{t('Off (bare client)')}</SelectItem>
+          </SelectContent>
+        </Select>
+      ) : undefined,
+  })
   if (MODEL_FETCHABLE_TYPES.has(props.channelType)) {
     options.push({
       key: 'model-check',
@@ -205,6 +259,7 @@ export function ChannelQuickOptions(props: ChannelQuickOptionsProps) {
             >
               {option.label}
             </Label>
+            {option.trailing}
           </div>
         ))}
       </div>
@@ -233,7 +288,9 @@ export function ChannelQuickOptions(props: ChannelQuickOptionsProps) {
             label={option.label}
             description={option.description}
             disabled={option.disabled}
-          />
+          >
+            {option.trailing}
+          </SettingsSwitchField>
         ))}
       </FieldGroup>
     </section>
