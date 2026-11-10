@@ -118,3 +118,15 @@ func TestRequestPolicyDatabaseMatrix(t *testing.T) {
 		})
 	}
 }
+
+func TestRequestPolicyDefaultRetryStatusCodes(t *testing.T) {
+	defaults := requestPolicyDefaultOptions()
+	assert.Equal(t, "100-199,300-399,401-407,409-421,423-599", defaults["AutomaticRetryStatusCodes"])
+	assert.False(t, operation_setting.ShouldRetryByStatusCode(400))
+	assert.False(t, operation_setting.ShouldRetryByStatusCode(408))
+	assert.False(t, operation_setting.ShouldRetryByStatusCode(422))
+	assert.True(t, operation_setting.ShouldRetryByStatusCode(421))
+	assert.True(t, operation_setting.ShouldRetryByStatusCode(423))
+	assert.True(t, operation_setting.ShouldRetryByStatusCode(504))
+	assert.True(t, operation_setting.ShouldRetryByStatusCode(524))
+}

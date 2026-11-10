@@ -273,12 +273,23 @@ describe('request policy settings', () => {
     })
     expect(codes).toBeVisible()
     expect(
+      screen.getByText(
+        '2xx are always excluded. Default excludes 400, 408, and 422.'
+      )
+    ).toBeVisible()
+    expect(
       screen.queryByRole('button', { name: 'Advanced settings' })
     ).not.toBeInTheDocument()
     fireEvent.change(codes, { target: { value: '599-500' } })
     await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
     expect(codes).toHaveAttribute('aria-invalid', 'true')
     expect(api.put).not.toHaveBeenCalled()
+  })
+
+  it('default retry status codes exclude 422 and include 504/524', () => {
+    expect(defaultRequestPolicySettings.AutomaticRetryStatusCodes).toBe(
+      '100-199,300-399,401-407,409-421,423-599'
+    )
   })
 
   it('a rejected save keeps the edited retry value and allows another save', async () => {

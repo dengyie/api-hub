@@ -152,7 +152,7 @@
     "24 Hours": "24 heures",
     "24 hours ago": "Il y a 24 heures",
     "29 Days": "29 jours",
-    "2xx, 504 and 524 are always excluded.": "2xx, 504 et 524 sont toujours exclus.",
+    "2xx are always excluded. Default excludes 400, 408, and 422.": "Les codes 2xx sont toujours exclus. Par défaut, 400, 408 et 422 sont également exclus.",
     "3. Enter your Gotify server URL and token above": "3. Saisissez l'URL de votre serveur Gotify et le jeton ci-dessus",
     "3. Review mappings": "3. Vérifier les correspondances",
     "30 days": "30 jours",

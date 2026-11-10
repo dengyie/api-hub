@@ -163,7 +163,7 @@ func DecideTaskRetry(c *gin.Context, taskErr *dto.TaskError, retryTimes int) Pol
 			break
 		}
 		return retry
-	case taskErr.StatusCode == http.StatusBadRequest, taskErr.StatusCode == 408:
+	case taskErr.StatusCode == http.StatusBadRequest, taskErr.StatusCode == 408, taskErr.StatusCode == http.StatusUnprocessableEntity:
 		stop.Reason = "status_not_retryable"
 	case taskErr.LocalError:
 		stop.Reason = "local_rejection"

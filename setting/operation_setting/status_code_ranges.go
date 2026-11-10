@@ -29,7 +29,12 @@ type statusCodeRules struct {
 	alwaysSkipCodes  map[types.ErrorCode]struct{}
 }
 
-// 默认重试区间：1xx、3xx、4xx（除 400/408）、全部 5xx；2xx 不重试。
+// 默认重试区间：1xx、3xx、4xx（除 400/408/422）、全部 5xx；2xx 不重试。
+//
+// 422 (Unprocessable Entity) 与 400 同属请求体/语义校验失败：泛化重试只会把同一份
+// 非法请求在剩余渠道上白白重打一遍。注意 DecideRelayRetry 仍会在状态码表之前优先
+// 识别 422 中的参数不支持（IsParamNotSupportedError -> bad_request_retry 参数裁剪）、
+// 容量/限流与中继代理异常，仅将泛化 422 校验错误拦截在 status_not_retryable。
 //
 // 上游遗留实现对 504/524 永不重试（alwaysSkipStatus 原本硬编码这两个码），
 // 理由是 origin 已等待很久、重试会翻倍客户端等待。这里刻意背离该约定，依据
@@ -49,8 +54,8 @@ func defaultStatusCodeRules() *statusCodeRules {
 			{Start: 100, End: 199},
 			{Start: 300, End: 399},
 			{Start: 401, End: 407},
-			{Start: 409, End: 499},
-			{Start: 500, End: 599},
+			{Start: 409, End: 421},
+			{Start: 423, End: 599},
 		},
 		// 保留机制但默认为空：不再有「任何启发式都拦不住的必跳过状态码」。
 		// 504/524 已移入常规重试区间，见上方注释。

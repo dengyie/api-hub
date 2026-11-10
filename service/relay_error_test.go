@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -141,6 +142,8 @@ func TestDecideRelayRetryReasons(t *testing.T) {
 	}{
 		{name: "retry status matched", err: upstream(http.StatusTooManyRequests), retries: 1, want: PolicyDecision{Action: "retry", Reason: "retry_status_matched", Source: "global"}},
 		{name: "status outside retry rules", err: upstream(http.StatusBadRequest), retries: 1, want: PolicyDecision{Action: "stop", Reason: "status_not_retryable", Source: "global"}},
+		{name: "generic 422 does not retry by default", err: upstreamError(http.StatusUnprocessableEntity, "invalid schema for response_format"), retries: 1, want: PolicyDecision{Action: "stop", Reason: "status_not_retryable", Source: "global"}},
+		{name: "422 rate limit still retries via heuristic", err: upstreamError(http.StatusUnprocessableEntity, "rate limit exceeded (RPM)"), retries: 1, want: PolicyDecision{Action: "retry", Reason: "upstream_rate_limited", Source: "loadbalancer"}},
 		{name: "unsupported param 400 retries", err: types.NewOpenAIError(errors.New("unsupported parameter: thinking"), types.ErrorCodeBadResponseStatusCode, http.StatusBadRequest), retries: 1, want: PolicyDecision{Action: "retry", Reason: "bad_request_retry", Source: "loadbalancer"}},
 		{name: "stream broken retries", err: types.NewErrorWithStatusCode(&loadbalancer.StreamBrokenError{ChannelID: 1, Reason: "scanner error"}, types.ErrorCodeBadResponseBody, http.StatusBadGateway), retries: 1, want: PolicyDecision{Action: "retry", Reason: "stream_broken", Source: "loadbalancer"}},
 		{name: "upstream quota exhausted 400 retries", err: types.NewOpenAIError(errors.New("credit insufficient balance: balance=0 required=9952"), types.ErrorCodeBadResponseStatusCode, http.StatusBadRequest), retries: 1, want: PolicyDecision{Action: "retry", Reason: "upstream_quota_exhausted", Source: "loadbalancer"}},
@@ -538,6 +541,53 @@ func TestEvaluateRelayFailure(t *testing.T) {
 		assert.Equal(t, BreakerQuota, decision.BreakerEffect)
 	})
 
+	t.Run("422 unsupported param retries with BreakerNone and extracts learned param", func(t *testing.T) {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		err := upstreamError(http.StatusUnprocessableEntity, "Validation: Unsupported parameter(s): `enable_thinking`")
+		decision := EvaluateRelayFailure(c, err, 2)
+		assert.Equal(t, "retry", decision.PolicyDecision.Action)
+		assert.Equal(t, "bad_request_retry", decision.PolicyDecision.Reason)
+		assert.Equal(t, "loadbalancer", decision.PolicyDecision.Source)
+		assert.Equal(t, BreakerNone, decision.BreakerEffect)
+		assert.Equal(t, "enable_thinking", decision.LearnedParam)
+	})
+
+	t.Run("generic 422 stops without tripping breaker", func(t *testing.T) {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		err := upstreamError(http.StatusUnprocessableEntity, "validation error: messages field required")
+		decision := EvaluateRelayFailure(c, err, 2)
+		assert.Equal(t, "stop", decision.PolicyDecision.Action)
+		assert.Equal(t, "status_not_retryable", decision.PolicyDecision.Reason)
+		assert.Equal(t, "global", decision.PolicyDecision.Source)
+		assert.Equal(t, BreakerNone, decision.BreakerEffect)
+	})
+
+	t.Run("relay error handler 422 JSON without type stops without tripping breaker", func(t *testing.T) {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		resp := &http.Response{
+			StatusCode: http.StatusUnprocessableEntity,
+			Body:       io.NopCloser(bytes.NewBufferString(`{"error":{"message":"validation error: messages field required"}}`)),
+		}
+		err := RelayErrorHandler(context.Background(), resp, false)
+		decision := EvaluateRelayFailure(c, err, 2)
+		assert.Equal(t, "stop", decision.PolicyDecision.Action)
+		assert.Equal(t, "status_not_retryable", decision.PolicyDecision.Reason)
+		assert.Equal(t, BreakerNone, decision.BreakerEffect)
+		assert.Equal(t, "upstream_error", err.ToOpenAIError().Type)
+	})
+
+	t.Run("relay error handler explicit upstream_error type still retries", func(t *testing.T) {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		resp := &http.Response{
+			StatusCode: http.StatusBadGateway,
+			Body:       io.NopCloser(bytes.NewBufferString(`{"error":{"message":"fixture upstream failure","type":"upstream_error"}}`)),
+		}
+		err := RelayErrorHandler(context.Background(), resp, false)
+		decision := EvaluateRelayFailure(c, err, 2)
+		assert.Equal(t, "retry", decision.PolicyDecision.Action)
+		assert.Equal(t, "upstream_relay_error", decision.PolicyDecision.Reason)
+	})
+
 	t.Run("pre-stream non-TTFT 502 correctly identified", func(t *testing.T) {
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
 		err := types.NewOpenAIError(errors.New("upstream gateway crashed"), types.ErrorCodeBadResponseStatusCode, http.StatusBadGateway)
@@ -554,6 +604,11 @@ func TestDecideTaskRetry(t *testing.T) {
 	assert.Equal(t, "task_accepted", DecideTaskRetry(c, &dto.TaskError{NoRetry: true}, 3).Reason)
 	assert.Equal(t, "retry", DecideTaskRetry(c, &dto.TaskError{StatusCode: http.StatusTooManyRequests}, 3).Action)
 	assert.Equal(t, "retry", DecideTaskRetry(c, &dto.TaskError{StatusCode: http.StatusBadGateway}, 3).Action)
+	for _, code := range []int{http.StatusBadRequest, http.StatusRequestTimeout, http.StatusUnprocessableEntity} {
+		decision := DecideTaskRetry(c, &dto.TaskError{StatusCode: code}, 3)
+		assert.Equal(t, "stop", decision.Action)
+		assert.Equal(t, "status_not_retryable", decision.Reason)
+	}
 	assert.Equal(t, "curfew_retry", DecideTaskRetry(c, &dto.TaskError{StatusCode: http.StatusForbidden, Message: "system_curfew"}, 3).Reason)
 	assert.Equal(t, "attempt_budget_exhausted", DecideTaskRetry(c, &dto.TaskError{StatusCode: http.StatusForbidden, Message: "system_curfew"}, 0).Reason)
 }

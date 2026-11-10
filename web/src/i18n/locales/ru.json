@@ -152,7 +152,7 @@
     "24 Hours": "24 часа",
     "24 hours ago": "24 часа назад",
     "29 Days": "29 дней",
-    "2xx, 504 and 524 are always excluded.": "2xx, 504 и 524 всегда исключены.",
+    "2xx are always excluded. Default excludes 400, 408, and 422.": "Коды 2xx всегда исключены. По умолчанию также исключены 400, 408 и 422.",
     "3. Enter your Gotify server URL and token above": "3. Введите URL вашего сервера Gotify и токен выше",
     "3. Review mappings": "3. Проверьте сопоставления",
     "30 days": "30 дней",

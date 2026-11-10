@@ -156,7 +156,7 @@
     "24 Hours": "24 小時",
     "24 hours ago": "24 小時前",
     "29 Days": "29 日",
-    "2xx, 504 and 524 are always excluded.": "2xx、504、524 一律排除。",
+    "2xx are always excluded. Default excludes 400, 408, and 422.": "2xx 一律排除；預設策略另排除 400、408 與 422。",
     "3. Enter your Gotify server URL and token above": "3. 在上方輸入您的 Gotify 伺服器 URL 和令牌",
     "3. Review mappings": "3. 確認對應結果",
     "30 days": "30 天",

@@ -66,10 +66,14 @@ func TestShouldRetryByStatusCode(t *testing.T) {
 }
 
 func TestShouldRetryByStatusCode_DefaultMatchesLegacyBehavior(t *testing.T) {
+	require.Equal(t, "100-199,300-399,401-407,409-421,423-599", AutomaticRetryStatusCodesToString())
 	require.False(t, ShouldRetryByStatusCode(200))
 	require.False(t, ShouldRetryByStatusCode(400))
 	require.True(t, ShouldRetryByStatusCode(401))
 	require.False(t, ShouldRetryByStatusCode(408))
+	require.True(t, ShouldRetryByStatusCode(421))
+	require.False(t, ShouldRetryByStatusCode(422))
+	require.True(t, ShouldRetryByStatusCode(423))
 	require.True(t, ShouldRetryByStatusCode(429))
 	require.True(t, ShouldRetryByStatusCode(500))
 	// 504/524 曾随上游遗留实现对慢上游网关超时（Cloudflare 504/524）永不重试。

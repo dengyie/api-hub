@@ -224,6 +224,9 @@ func (e *NewAPIError) ToOpenAIError() OpenAIError {
 			Code:    e.errorCode,
 		}
 	}
+	if result.Type == "" {
+		result.Type = string(ErrorTypeUpstreamError)
+	}
 	if e.errorCode != ErrorCodeCountTokenFailed {
 		result.Message = kitutil.MaskSensitiveInfo(result.Message)
 	}
@@ -252,6 +255,9 @@ func (e *NewAPIError) ToClaudeError() ClaudeError {
 			Message: e.Error(),
 			Type:    string(e.errorType),
 		}
+	}
+	if result.Type == "" {
+		result.Type = string(ErrorTypeUpstreamError)
 	}
 	if e.errorCode != ErrorCodeCountTokenFailed {
 		result.Message = kitutil.MaskSensitiveInfo(result.Message)
@@ -348,9 +354,6 @@ func WithOpenAIError(openAIError OpenAIError, statusCode int, ops ...NewAPIError
 			code = "unknown_error"
 		}
 	}
-	if openAIError.Type == "" {
-		openAIError.Type = "upstream_error"
-	}
 	e := &NewAPIError{
 		RelayError: openAIError,
 		errorType:  ErrorTypeOpenAIError,
@@ -372,15 +375,16 @@ func WithOpenAIError(openAIError OpenAIError, statusCode int, ops ...NewAPIError
 }
 
 func WithClaudeError(claudeError ClaudeError, statusCode int, ops ...NewAPIErrorOptions) *NewAPIError {
-	if claudeError.Type == "" {
-		claudeError.Type = "upstream_error"
+	errorCode := claudeError.Type
+	if errorCode == "" {
+		errorCode = string(ErrorTypeUpstreamError)
 	}
 	e := &NewAPIError{
 		RelayError: claudeError,
 		errorType:  ErrorTypeClaudeError,
 		StatusCode: statusCode,
 		Err:        errors.New(claudeError.Message),
-		errorCode:  ErrorCode(claudeError.Type),
+		errorCode:  ErrorCode(errorCode),
 	}
 	for _, op := range ops {
 		op(e)

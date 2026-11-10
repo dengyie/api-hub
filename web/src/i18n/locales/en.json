@@ -156,7 +156,7 @@
     "24 Hours": "24 Hours",
     "24 hours ago": "24 hours ago",
     "29 Days": "29 Days",
-    "2xx, 504 and 524 are always excluded.": "2xx, 504 and 524 are always excluded.",
+    "2xx are always excluded. Default excludes 400, 408, and 422.": "2xx are always excluded. Default excludes 400, 408, and 422.",
     "3. Enter your Gotify server URL and token above": "3. Enter your Gotify server URL and token above",
     "3. Review mappings": "3. Review mappings",
     "30 days": "30 days",

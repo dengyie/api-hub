@@ -74,7 +74,9 @@ export function RetrySection() {
                 />
               </FormControl>
               <FormDescription>
-                {t('2xx, 504 and 524 are always excluded.')}
+                {t(
+                  '2xx are always excluded. Default excludes 400, 408, and 422.'
+                )}
               </FormDescription>
               <FormMessage />
             </FormItem>

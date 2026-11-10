@@ -156,7 +156,7 @@
     "24 Hours": "24時間",
     "24 hours ago": "24時間前",
     "29 Days": "29日",
-    "2xx, 504 and 524 are always excluded.": "2xx・504・524 は常に除外されます。",
+    "2xx are always excluded. Default excludes 400, 408, and 422.": "2xx は常に除外されます。デフォルトでは 400、408、422 も除外されます。",
     "3. Enter your Gotify server URL and token above": "3. 上記にGotifyサーバーのURLとトークンを入力します",
     "3. Review mappings": "3. マッピングを確認",
     "30 days": "30 日",

@@ -680,6 +680,19 @@ func TestIsUpstreamRelayError(t *testing.T) {
 		},
 	}
 	assert.True(t, IsUpstreamRelayError(errGatewayError))
+
+	// 上游 JSON 缺失 type 字段时，WithOpenAIError 不得伪造 "upstream_error" 并触发中继熔断。
+	errValidationWithoutType := types.WithOpenAIError(types.OpenAIError{
+		Message: "validation error: messages field required",
+	}, http.StatusUnprocessableEntity)
+	assert.False(t, IsUpstreamRelayError(errValidationWithoutType))
+
+	// 上游显式返回 type="upstream_error" 时仍应识别为中继失效。
+	errExplicitUpstreamType := types.WithOpenAIError(types.OpenAIError{
+		Message: "fixture upstream failure",
+		Type:    "upstream_error",
+	}, http.StatusBadGateway)
+	assert.True(t, IsUpstreamRelayError(errExplicitUpstreamType))
 }
 
 // TestIsUpstreamRelayErrorExcludesParamErrorOn5xx 钉住 5xx 参数错误**不**熔断。
