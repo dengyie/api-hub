@@ -829,10 +829,11 @@ func TestApplyUpstreamClientFingerprint(t *testing.T) {
 			wantAbsent: []string{"x-opencode-session"},
 		},
 		{
-			name:        "forced codex disguise applies on anthropic channels too",
-			channelType: constant.ChannelTypeAnthropic,
-			model:       "deepseek-v4.1-flash",
-			fingerprint: dto.ClientFingerprintCodex,
+			name:             "forced codex disguise applies on anthropic channels too",
+			channelType:      constant.ChannelTypeAnthropic,
+			model:            "deepseek-v4.1-flash",
+			fingerprint:      dto.ClientFingerprintCodex,
+			finalRelayFormat: types.RelayFormatClaude,
 			clientHeaders: map[string]string{
 				"User-Agent": "curl/8.7.1",
 			},
@@ -840,7 +841,7 @@ func TestApplyUpstreamClientFingerprint(t *testing.T) {
 				"User-Agent": codexFingerprintUserAgent,
 				"originator": codexFingerprintOriginator,
 			},
-			wantAbsent: []string{"x-opencode-session", "anthropic-client-platform"},
+			wantAbsent: []string{"x-opencode-session", "anthropic-client-platform", "X-Session-UUID"},
 		},
 		{
 			name:          "fingerprint off disables all disguise on gpt models",
@@ -848,18 +849,17 @@ func TestApplyUpstreamClientFingerprint(t *testing.T) {
 			model:         "gpt-5.5",
 			fingerprint:   dto.ClientFingerprintOff,
 			clientHeaders: map[string]string{"User-Agent": "OpenAI/Python 1.99.0"},
-			want:          map[string]string{"x-opencode-session": UserSessionUUID(7)},
-			wantAbsent:    []string{"originator", "OpenAI-Beta", "X-Codex-Beta-Features"},
+			wantAbsent:    []string{"originator", "OpenAI-Beta", "X-Codex-Beta-Features", "x-opencode-session"},
 		},
 		{
-			name:          "fingerprint off disables claude fingerprint on anthropic channels",
-			channelType:   constant.ChannelTypeAnthropic,
-			model:         "claude-sonnet-5",
-			fingerprint:   dto.ClientFingerprintOff,
-			relayFormat:   types.RelayFormatClaude,
-			clientHeaders: map[string]string{"User-Agent": "curl/8.7.1"},
-			want:          map[string]string{"x-opencode-session": UserSessionUUID(7)},
-			wantAbsent:    []string{"anthropic-client-platform", "anthropic-version", "User-Agent"},
+			name:             "fingerprint off disables claude fingerprint on anthropic channels",
+			channelType:      constant.ChannelTypeAnthropic,
+			model:            "claude-sonnet-5",
+			fingerprint:      dto.ClientFingerprintOff,
+			relayFormat:      types.RelayFormatClaude,
+			finalRelayFormat: types.RelayFormatClaude,
+			clientHeaders:    map[string]string{"User-Agent": "curl/8.7.1"},
+			wantAbsent:       []string{"anthropic-client-platform", "anthropic-version", "User-Agent", "x-opencode-session", "X-Session-UUID"},
 		},
 		{
 			name:             "forced claude disguise applies to openai channel with claude envelope",
@@ -886,7 +886,7 @@ func TestApplyUpstreamClientFingerprint(t *testing.T) {
 			clientHeaders: map[string]string{
 				"User-Agent": "OpenAI/Python 1.99.0",
 			},
-			want:           map[string]string{"x-opencode-session": UserSessionUUID(7)},
+			want:       map[string]string{"x-opencode-session": UserSessionUUID(7)},
 			wantAbsent: []string{"originator"},
 		},
 	}
@@ -908,9 +908,9 @@ func TestApplyUpstreamClientFingerprint(t *testing.T) {
 				RelayFormat:             tt.relayFormat,
 				FinalRequestRelayFormat: tt.finalRelayFormat,
 				ChannelMeta: &relaycommon.ChannelMeta{
-					ChannelType:     tt.channelType,
-					ChannelBaseUrl:  tt.channelBaseURL,
-					ChannelSetting:  dto.ChannelSettings{ClientFingerprint: tt.fingerprint},
+					ChannelType:    tt.channelType,
+					ChannelBaseUrl: tt.channelBaseURL,
+					ChannelSetting: dto.ChannelSettings{ClientFingerprint: tt.fingerprint},
 				},
 			}
 
@@ -925,7 +925,11 @@ func TestApplyUpstreamClientFingerprint(t *testing.T) {
 			for _, k := range tt.wantAbsent {
 				assert.Empty(t, req.Header.Get(k), k)
 			}
-			if usesClaudeFingerprint(info) {
+			if tt.fingerprint == dto.ClientFingerprintOff {
+				assert.Empty(t, req.Header.Get("x-opencode-session"))
+				assert.Empty(t, req.Header.Get("session_id"))
+				assert.Empty(t, req.Header.Get("X-Session-UUID"))
+			} else if usesClaudeFingerprint(info) {
 				assert.Empty(t, req.Header.Get("x-opencode-session"))
 				assert.NotEmpty(t, req.Header.Get("X-Session-UUID"))
 			} else if usesCodexFingerprint(info) {

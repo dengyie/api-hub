@@ -104,7 +104,7 @@ func usesClaudeFingerprint(info *common.RelayInfo) bool {
 	if info == nil || info.ChannelMeta == nil {
 		return false
 	}
-	if channelFingerprintMode(info) == dto.ClientFingerprintOff {
+	if channelFingerprintMode(info) == dto.ClientFingerprintOff || channelFingerprintMode(info) == dto.ClientFingerprintCodex {
 		return false
 	}
 	if info.GetFinalRequestRelayFormat() != types.RelayFormatClaude {
@@ -197,6 +197,9 @@ func applyClaudeCodeFingerprint(c *gin.Context, req *http.Request, userSession s
 // It runs after header_override and only fills headers that are still missing, so an
 // explicit channel header_override always wins.
 func applyUpstreamClientFingerprint(c *gin.Context, info *common.RelayInfo, req *http.Request) {
+	if channelFingerprintMode(info) == dto.ClientFingerprintOff {
+		return
+	}
 	userSession := UserSessionUUID(c.GetInt("id"))
 	if usesClaudeFingerprint(info) {
 		applyClaudeCodeFingerprint(c, req, userSession)

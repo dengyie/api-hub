@@ -93,7 +93,7 @@ func TestPanelHiddenSettingKeysAreRealFields(t *testing.T) {
 func settingKeyExistsInJSON(key string) bool {
 	s := dto.ChannelSettings{ReasoningAsContent: true, ForceFormat: true, ThinkingToContent: true,
 		PassThroughBodyEnabled: true, ResponsesWebSocketEnabled: true, SystemPromptOverride: true,
-		ThinkTagToReasoning: true}
+		ThinkTagToReasoning: true, DisableReasoningCoalesce: true}
 	b, err := common.Marshal(s)
 	if err != nil {
 		return false

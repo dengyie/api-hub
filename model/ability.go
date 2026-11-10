@@ -233,18 +233,24 @@ func UpdateAbilityStatusByTag(tx *gorm.DB, tag string, status bool) error {
 	return tx.Model(&Ability{}).Where("tag = ?", tag).Select("enabled").Update("enabled", status).Error
 }
 
-func UpdateAbilityByTag(tag string, newTag *string, priority *int64, weight *uint) error {
-	ability := Ability{}
+func UpdateAbilityByTag(tx *gorm.DB, tag string, newTag *string, priority *int64, weight *uint) error {
+	if tx == nil {
+		tx = DB
+	}
+	updates := map[string]any{}
 	if newTag != nil {
-		ability.Tag = newTag
+		updates["tag"] = *newTag
 	}
 	if priority != nil {
-		ability.Priority = priority
+		updates["priority"] = *priority
 	}
 	if weight != nil {
-		ability.Weight = *weight
+		updates["weight"] = *weight
 	}
-	return DB.Model(&Ability{}).Where("tag = ?", tag).Updates(ability).Error
+	if len(updates) == 0 {
+		return nil
+	}
+	return tx.Model(&Ability{}).Where("tag = ?", tag).Updates(updates).Error
 }
 
 var fixLock = sync.Mutex{}

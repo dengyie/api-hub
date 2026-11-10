@@ -838,10 +838,10 @@ func AddChannel(c *gin.Context) {
 		} else {
 			cleanKeys := make([]string, 0)
 			for key := range strings.SplitSeq(addChannelRequest.Channel.Key, "\n") {
+				key = strings.TrimSpace(key)
 				if key == "" {
 					continue
 				}
-				key = strings.TrimSpace(key)
 				cleanKeys = append(cleanKeys, key)
 			}
 			addChannelRequest.Channel.ChannelInfo.MultiKeySize = len(cleanKeys)
@@ -860,7 +860,8 @@ func AddChannel(c *gin.Context) {
 				return
 			}
 		} else {
-			keys = strings.Split(addChannelRequest.Channel.Key, "\n")
+			normalized := strings.ReplaceAll(addChannelRequest.Channel.Key, "\r\n", "\n")
+			keys = strings.Split(normalized, "\n")
 		}
 	case "single":
 		keys = []string{addChannelRequest.Channel.Key}
@@ -872,21 +873,23 @@ func AddChannel(c *gin.Context) {
 		return
 	}
 
+	baseName := addChannelRequest.Channel.Name
 	channels := make([]model.Channel, 0, len(keys))
 	for _, key := range keys {
-		if key == "" {
+		cleanKey := strings.TrimSpace(key)
+		if cleanKey == "" {
 			continue
 		}
-		localChannel := addChannelRequest.Channel
-		localChannel.Key = key
+		channelCopy := *addChannelRequest.Channel
+		channelCopy.Key = cleanKey
 		if addChannelRequest.BatchAddSetKeyPrefix2Name && len(keys) > 1 {
-			keyPrefix := localChannel.Key
-			if len(localChannel.Key) > 8 {
-				keyPrefix = localChannel.Key[:8]
+			keyPrefix := cleanKey
+			if len(keyPrefix) > 8 {
+				keyPrefix = keyPrefix[:8]
 			}
-			localChannel.Name = fmt.Sprintf("%s %s", localChannel.Name, keyPrefix)
+			channelCopy.Name = fmt.Sprintf("%s %s", baseName, keyPrefix)
 		}
-		channels = append(channels, *localChannel)
+		channels = append(channels, channelCopy)
 	}
 	err = model.BatchInsertChannels(channels)
 	if err != nil {

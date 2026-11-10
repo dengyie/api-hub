@@ -25,6 +25,7 @@ import (
 var PanelHiddenSettingKeys = []string{
 	"reasoning_as_content",
 	"think_tag_to_reasoning",
+	"disable_reasoning_coalesce",
 }
 
 type ChannelSettings struct {
@@ -60,12 +61,6 @@ type ChannelSettings struct {
 	// defaults to on. Opt out only for a client that depends on exact upstream
 	// frame boundaries.
 	DisableReasoningCoalesce bool `json:"disable_reasoning_coalesce,omitempty"`
-	// SystemOneFlavor selects the upstream dialect for type-65 jev channels:
-	// "" (default) = native System One passthrough (TypeSafe / FuturePPO /
-	// MindsHub), "bivia" = translate the jev envelope onto Articul8 Bivia's
-	// /v1/systemone (object state serialized into the string Bivia requires;
-	// answers come back in the same Shape-1 format, so clients see one
-	// protocol either way).
 	// ClientFingerprint forces the upstream client disguise for this channel,
 	// overriding the automatic heuristics in relay/channel/upstream_fingerprint.go:
 	// "" / "auto" = automatic (codex fingerprint on type=1 gpt-* models, claude

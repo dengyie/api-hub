@@ -351,3 +351,84 @@ func TestChannelUpdateClearsPerModelRecords(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, cleared, "留痕已清，EnableChannelModel 不该再动 abilities")
 }
+
+func TestEditChannelByTagRebuildsAbilitiesAndClearsPerModelRecords(t *testing.T) {
+	setupChannelStatusTest(t)
+	channel := seedChannelWithModels(t, "tag-edit-clears", []string{"m1", "m2"}, true)
+	channel.Tag = common.GetPointer("ops")
+	require.NoError(t, DB.Save(channel).Error)
+	require.NoError(t, DB.Model(&Ability{}).Where("channel_id = ?", channel.Id).
+		Update("tag", "ops").Error)
+
+	_, err := DisableChannelModel(channel.Id, "m1", "模型不存在")
+	require.NoError(t, err)
+	require.False(t, abilityEnabled(t, channel.Id, "m1"))
+
+	require.NoError(t, EditChannelByTag(
+		"ops",
+		common.GetPointer("ops-v2"),
+		nil,
+		common.GetPointer("m1,m2,m3"),
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	))
+
+	assert.True(t, abilityEnabled(t, channel.Id, "m1"), "重建 abilities 后 m1 回到轮转")
+	assert.True(t, abilityEnabled(t, channel.Id, "m3"), "新增模型 m3 应同步写入 abilities")
+
+	var stored Channel
+	require.NoError(t, DB.First(&stored, channel.Id).Error)
+	assert.Empty(t, stored.ChannelInfo.ModelDisabledReason, "重建 abilities 后留痕必须同步清空")
+	assert.Empty(t, stored.ChannelInfo.ModelDisabledTime)
+	require.NotNil(t, stored.Tag)
+	assert.Equal(t, "ops-v2", *stored.Tag)
+
+	cleared, err := EnableChannelModel(channel.Id, "m1")
+	require.NoError(t, err)
+	assert.False(t, cleared, "留痕已清，EnableChannelModel 不该再动 abilities")
+}
+
+func TestEditChannelByTagSyncsZeroWeightAndPreservesPerModelDisabledWhenNotRebuilding(t *testing.T) {
+	setupChannelStatusTest(t)
+	channel := seedChannelWithModels(t, "tag-edit-weight", []string{"m1", "m2"}, true)
+	channel.Tag = common.GetPointer("ops")
+	channel.Priority = common.GetPointer(int64(10))
+	channel.Weight = common.GetPointer(uint(5))
+	require.NoError(t, DB.Save(channel).Error)
+	require.NoError(t, DB.Model(&Ability{}).Where("channel_id = ?", channel.Id).
+		Updates(map[string]any{"tag": "ops", "priority": 10, "weight": 5}).Error)
+
+	_, err := DisableChannelModel(channel.Id, "m1", "模型不存在")
+	require.NoError(t, err)
+
+	require.NoError(t, EditChannelByTag(
+		"ops",
+		nil,
+		nil,
+		nil,
+		nil,
+		common.GetPointer(int64(0)),
+		common.GetPointer(uint(0)),
+		nil,
+		nil,
+	))
+
+	assert.False(t, abilityEnabled(t, channel.Id, "m1"), "未重建 abilities 时已摘除模型保持禁用")
+	assert.True(t, abilityEnabled(t, channel.Id, "m2"))
+
+	var stored Channel
+	require.NoError(t, DB.First(&stored, channel.Id).Error)
+	assert.Contains(t, stored.ChannelInfo.ModelDisabledReason, "m1", "未重建 abilities 时留痕必须保留")
+
+	var abilities []Ability
+	require.NoError(t, DB.Where("channel_id = ?", channel.Id).Find(&abilities).Error)
+	require.Len(t, abilities, 2)
+	for _, a := range abilities {
+		require.NotNil(t, a.Priority)
+		assert.Equal(t, int64(0), *a.Priority)
+		assert.Equal(t, uint(0), a.Weight)
+	}
+}

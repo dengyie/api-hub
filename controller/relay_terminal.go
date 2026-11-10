@@ -87,7 +87,6 @@ func applyRelayTerminalStatusShield(c *gin.Context, newAPIError *types.NewAPIErr
 			loadbalancer.IsUpstreamModelUnavailableError(newAPIError) ||
 			loadbalancer.IsUpstreamRelayError(newAPIError) ||
 			loadbalancer.IsThinkingModeHistoryError(newAPIError) ||
-			loadbalancer.IsUpstreamToolCallStateLostError(newAPIError) ||
 			loadbalancer.IsReasoningHydrationError(newAPIError) ||
 			newAPIError.StatusCode == http.StatusForbidden ||
 			newAPIError.StatusCode == http.StatusUnauthorized ||

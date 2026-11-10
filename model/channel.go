@@ -1289,11 +1289,11 @@ func DisableChannelByTag(tag string) error {
 func EditChannelByTag(tag string, newTag *string, modelMapping *string, models *string, group *string, priority *int64, weight *uint, paramOverride *string, headerOverride *string) error {
 	updateData := Channel{}
 	shouldReCreateAbilities := false
-	updatedTag := tag
+	var updateNewTag *string
 	// 如果 newTag 不为空且不等于 tag，则更新 tag
 	if newTag != nil && *newTag != tag {
 		updateData.Tag = newTag
-		updatedTag = *newTag
+		updateNewTag = newTag
 	}
 	if modelMapping != nil {
 		updateData.ModelMapping = modelMapping
@@ -1319,27 +1319,43 @@ func EditChannelByTag(tag string, newTag *string, modelMapping *string, models *
 		updateData.HeaderOverride = headerOverride
 	}
 
-	err := DB.Model(&Channel{}).Where("tag = ?", tag).Updates(updateData).Error
+	ids, err := tagChannelIds(tag)
 	if err != nil {
 		return err
 	}
-	if shouldReCreateAbilities {
-		channels, err := GetChannelsByTag(updatedTag, false, false)
-		if err == nil {
-			for _, channel := range channels {
-				err = channel.UpdateAbilities(nil)
-				if err != nil {
-					common.SysLog(fmt.Sprintf("failed to update abilities: channel_id=%d, tag=%s, error=%v", channel.Id, channel.GetTag(), err))
-				}
+	if len(ids) == 0 {
+		return nil
+	}
+	// 先按全局定序取锁、再开事务，避免与 DisableChannelModel / UpdateChannelStatus 互等死锁。
+	unlock := lockChannelsInIdOrder(ids)
+	defer unlock()
+
+	return DB.Transaction(func(tx *gorm.DB) error {
+		for _, chunk := range lo.Chunk(ids, 200) {
+			if err := tx.Model(&Channel{}).Where("id in ?", chunk).Updates(updateData).Error; err != nil {
+				return err
 			}
 		}
-	} else {
-		err := UpdateAbilityByTag(tag, newTag, priority, weight)
-		if err != nil {
-			return err
+		if shouldReCreateAbilities {
+			var channels []Channel
+			for _, chunk := range lo.Chunk(ids, 200) {
+				var batch []Channel
+				if err := tx.Omit("key").Where("id in ?", chunk).Find(&batch).Error; err != nil {
+					return err
+				}
+				channels = append(channels, batch...)
+			}
+			for i := range channels {
+				if err := channels[i].UpdateAbilities(tx); err != nil {
+					return err
+				}
+			}
+			// UpdateAbilities 会按 channels.status 重建全部 abilities，被 per-model 摘除的模型
+			// 会重新回到轮转；与 Channel.Update / EnableChannelByTag 保持同一不变量，同步清空留痕。
+			return clearModelDisabledRecords(tx, channels)
 		}
-	}
-	return nil
+		return UpdateAbilityByTag(tx, tag, updateNewTag, priority, weight)
+	})
 }
 
 func UpdateChannelUsedQuota(id int, quota int) {
