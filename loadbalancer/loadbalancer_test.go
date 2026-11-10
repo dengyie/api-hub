@@ -769,6 +769,15 @@ func TestIsUpstreamPermissionError(t *testing.T) {
 	}
 	assert.True(t, IsUpstreamPermissionError(errRelay))
 
+	errUserType := &types.NewAPIError{
+		StatusCode: 400,
+		RelayError: types.OpenAIError{
+			Message: "model glm-5.3 is not allowed for user type personal_free_user",
+		},
+		Err: errors.New("model glm-5.3 is not allowed for user type personal_free_user"),
+	}
+	assert.True(t, IsUpstreamPermissionError(errUserType))
+
 	errNormal400 := &types.NewAPIError{
 		StatusCode: 400,
 		Err:        errors.New("invalid json payload"),

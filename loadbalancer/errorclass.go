@@ -301,6 +301,7 @@ func IsUpstreamPermissionError(err *types.NewAPIError) bool {
 		strings.Contains(msg, "permission_denied") ||
 		strings.Contains(msg, "operation not allowed") ||
 		strings.Contains(msg, "your account is not authorized") ||
+		strings.Contains(msg, "not allowed for user type") ||
 		(strings.Contains(msg, "当前分组") && (strings.Contains(msg, "不可调用") || strings.Contains(msg, "无可用渠道") || strings.Contains(msg, "无权"))) {
 		return true
 	}
@@ -315,7 +316,8 @@ func IsUpstreamPermissionError(err *types.NewAPIError) bool {
 			strings.Contains(typeStr, "permission_denied") ||
 			strings.Contains(msgStr, "无权访问") ||
 			strings.Contains(msgStr, "not supported by tokenplan") ||
-			strings.Contains(msgStr, "is not supported by tokenplan") {
+			strings.Contains(msgStr, "is not supported by tokenplan") ||
+			strings.Contains(msgStr, "not allowed for user type") {
 			return true
 		}
 	} else if poe, ok := err.RelayError.(*types.OpenAIError); ok && poe != nil {
@@ -329,7 +331,8 @@ func IsUpstreamPermissionError(err *types.NewAPIError) bool {
 			strings.Contains(typeStr, "permission_denied") ||
 			strings.Contains(msgStr, "无权访问") ||
 			strings.Contains(msgStr, "not supported by tokenplan") ||
-			strings.Contains(msgStr, "is not supported by tokenplan") {
+			strings.Contains(msgStr, "is not supported by tokenplan") ||
+			strings.Contains(msgStr, "not allowed for user type") {
 			return true
 		}
 	}
