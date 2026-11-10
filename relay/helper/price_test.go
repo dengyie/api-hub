@@ -745,3 +745,56 @@ func (s *priceTestReservation) Refund(*gin.Context)      {}
 func (s *priceTestReservation) NeedsRefund() bool        { return false }
 func (s *priceTestReservation) GetPreConsumedQuota() int { return s.held }
 func (s *priceTestReservation) Reserve(quota int) error  { s.held = max(s.held, quota); return nil }
+
+func TestModelPriceHelperTieredFreeModelExemption(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	saved := map[string]string{}
+	require.NoError(t, config.GlobalConfig.SaveToDB(func(key, value string) error {
+		saved[key] = value
+		return nil
+	}))
+	t.Cleanup(func() {
+		require.NoError(t, config.GlobalConfig.LoadFromDB(saved))
+	})
+
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+		"billing_setting.billing_mode":    `{"hy3-free-test":"tiered_expr"}`,
+		"billing_setting.billing_expr":    `{"hy3-free-test":"tier(\"free\", fixed(0))"}`,
+		"group_ratio_setting.group_ratio": `{"default":1}`,
+	}))
+
+	oldEnableFree := operation_setting.GetQuotaSetting().EnableFreeModelPreConsume
+	t.Cleanup(func() {
+		operation_setting.GetQuotaSetting().EnableFreeModelPreConsume = oldEnableFree
+	})
+
+	// When EnableFreeModelPreConsume is false (the default in production), free tiered models
+	// must be marked FreeModel: true and have 0 QuotaToPreConsume to bypass NewBillingSession.
+	operation_setting.GetQuotaSetting().EnableFreeModelPreConsume = false
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	info := &relaycommon.RelayInfo{
+		OriginModelName:     "hy3-free-test",
+		UserGroup:           "default",
+		UsingGroup:          "default",
+		BillingRequestInput: &billingexpr.RequestInput{},
+	}
+	price, err := ModelPriceHelper(ctx, info, 100, &types.TokenCountMeta{MaxTokens: 4096})
+	require.NoError(t, err)
+	assert.True(t, price.FreeModel, "zero-quota tiered model must be FreeModel when EnableFreeModelPreConsume is false")
+	assert.Equal(t, 0, price.QuotaToPreConsume)
+
+	// When EnableFreeModelPreConsume is true, FreeModel is not granted even if cost is 0.
+	operation_setting.GetQuotaSetting().EnableFreeModelPreConsume = true
+	info2 := &relaycommon.RelayInfo{
+		OriginModelName:     "hy3-free-test",
+		UserGroup:           "default",
+		UsingGroup:          "default",
+		BillingRequestInput: &billingexpr.RequestInput{},
+	}
+	price2, err := ModelPriceHelper(ctx, info2, 100, &types.TokenCountMeta{MaxTokens: 4096})
+	require.NoError(t, err)
+	assert.False(t, price2.FreeModel)
+	assert.Equal(t, 0, price2.QuotaToPreConsume)
+}

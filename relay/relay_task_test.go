@@ -467,3 +467,18 @@ export function parseTaskResult() { return {status:"SUCCESS"}; }
 		})
 	}
 }
+
+func TestRelayTaskFetchInvalidModeReturnsErrorWithoutPanic(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/tasks/task-123/fetch", nil)
+
+	var taskErr *dto.TaskError
+	assert.NotPanics(t, func() {
+		taskErr = RelayTaskFetch(c, 999999)
+	})
+	require.NotNil(t, taskErr)
+	assert.Equal(t, http.StatusBadRequest, taskErr.StatusCode)
+	assert.Equal(t, "invalid_relay_mode", taskErr.Code)
+}
