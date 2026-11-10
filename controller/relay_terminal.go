@@ -29,7 +29,7 @@ const relayGatewayFaultStatus = http.StatusServiceUnavailable
 
 const upstreamToolCallStateLostMessage = "工具调用续接失败：当前渠道没有这次工具调用的会话记录，无法继续。" +
 	"这通常不是你的请求或凭据有问题，而是网关侧的会话粘性记录失效（重启或发版后清空），" +
-	"续接请求被路由到了当初产生该 call_id 的渠道之外。请重试；若反复失败，请新建会话重新开始。"
+	"续接请求被路由到了当初产生该 call_id 的渠道之外。这条请求重试不会再成功，请新建会话重新开始。"
 
 const upstreamReasoningHydrationErrorMessage = "跨账号推理思考密文校验失败：多轮会话中的加密思考项与上游账号不匹配。" +
 	"网关已自动尝试剥离加密项并自愈重试，若重试耗尽仍失败，建议新建会话重新开始。"
@@ -71,6 +71,15 @@ func applyRelayTerminalStatusShield(c *gin.Context, newAPIError *types.NewAPIErr
 	}
 	isUpstreamChannelError := c != nil && len(c.GetStringSlice("use_channel")) > 0
 	if isUpstreamChannelError && newAPIError.GetErrorCode() != types.ErrorCodeInsufficientUserQuota {
+		// 「上游丢失工具调用会话状态」终结为原始 400，绝不盾标成 5xx：这份会话
+		// 历史里的 call_id 在上游已不存在，重试同一请求 100% 无效（生产实测 #248
+		// 同一 call_id 两小时被客户端重打 90 次）。客户端 SDK 对 4xx 停止重试、
+		// 对 5xx 指数退避重试——盾标 503 等于把不可恢复错误包装成「可重试故障」，
+		// 喂出无限重试循环。400 语义也准确：错误随这份请求体走，换渠道/换时间
+		// 都救不了，只有客户端换一份会话历史才能解。
+		if loadbalancer.IsUpstreamToolCallStateLostError(newAPIError) {
+			return
+		}
 		if loadbalancer.IsEOLError(newAPIError) ||
 			loadbalancer.IsUpstreamPermissionError(newAPIError) ||
 			loadbalancer.IsUpstreamQuotaError(newAPIError) ||

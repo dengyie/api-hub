@@ -266,6 +266,8 @@ func TestRetryLoop_ContextDeadlineExceededDoesNotMarkClientAborted(t *testing.T)
 
 // TestToolCallStateLostMessageIsSelfExplanatory 钉住用户最终读到的文案：
 // 上游原文只描述现象，必须被替换成有成因、有出路的说明，原始报错附在句尾备查。
+// 出路必须是「新建会话」而非「重试」——重试同一请求永远失败（call_id 已死），
+// 提示重试会喂出客户端无限重试循环（生产实测 #248 同一 call_id 90 次重打）。
 func TestToolCallStateLostMessageIsSelfExplanatory(t *testing.T) {
 	raw := "找不到可消费的工具调用状态：call_id=call_qGRzoQMDDF3pXgOX7gt6TFaw"
 	err := types.NewErrorWithStatusCode(
@@ -278,8 +280,32 @@ func TestToolCallStateLostMessageIsSelfExplanatory(t *testing.T) {
 	msg := clientFacingRelayMessage(err)
 	assert.Contains(t, msg, "工具调用续接失败")
 	assert.Contains(t, msg, "会话粘性")
-	assert.Contains(t, msg, "重试")
+	assert.Contains(t, msg, "重试不会再成功", "必须明确告知重试无效")
+	assert.Contains(t, msg, "新建会话")
+	assert.NotContains(t, msg, "请重试", "不得暗示重试同一请求")
 	assert.Contains(t, msg, raw, "原始报错要保留，便于对日志排查")
+}
+
+// TestToolCallStateLostShieldKeeps400 终结盾不得把「上游丢失工具调用会话状态」
+// 改写成 5xx：4xx 语义（错误随请求体的历史内容走）才能让客户端 SDK 停止重试。
+// 生产实测：503 + 「请重试」文案曾让 codex CLI 对同一死 call_id 指数退避重打
+// 两小时（#248 渠道 90 次）。
+func TestToolCallStateLostShieldKeeps400(t *testing.T) {
+	raw := "找不到可消费的工具调用状态：call_id=call_qGRzoQMDDF3pXgOX7gt6TFaw"
+	err := types.NewErrorWithStatusCode(
+		errors.New(raw),
+		types.ErrorCodeBadResponseStatusCode,
+		http.StatusBadRequest,
+	)
+	require.True(t, loadbalancer.IsUpstreamToolCallStateLostError(err))
+
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	c.Set("use_channel", []string{"248"})
+
+	applyRelayTerminalStatusShield(c, err)
+	assert.Equal(t, http.StatusBadRequest, err.StatusCode,
+		"盾必须放行这类错误保持 400，改写成 5xx 会喂出客户端重试循环")
 }
 
 // TestReasoningHydrationErrorMessageIsSelfExplanatory 验证跨账号推理水合报错文案被友好改写。
