@@ -3,6 +3,7 @@ package controller
 import (
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -215,7 +216,14 @@ func getModelListGroups(c *gin.Context) (modelListGroups, error) {
 	}, nil
 }
 
-func ListModels(c *gin.Context, modelType int) {
+type visibleModelContext struct {
+	acceptUnsetRatioModel bool
+	ownerGroups           []string
+	modelLimitEnable      bool
+	tokenModelLimit       map[string]bool
+}
+
+func resolveVisibleModelContext(c *gin.Context) (visibleModelContext, error) {
 	acceptUnsetRatioModel := operation_setting.SelfUseModeEnabled
 	if !acceptUnsetRatioModel {
 		userId := c.GetInt("id")
@@ -227,16 +235,11 @@ func ListModels(c *gin.Context, modelType int) {
 		}
 	}
 
-	userModelNames := make([]string, 0)
 	groups, err := getModelListGroups(c)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": "get user group failed",
-		})
-		return
+		return visibleModelContext{}, err
 	}
-	ownerGroups := groups.ownerGroups
+
 	modelLimitEnable := common.GetContextKeyBool(c, constant.ContextKeyTokenModelLimitEnabled)
 	var tokenModelLimit map[string]bool
 	if modelLimitEnable {
@@ -248,23 +251,66 @@ func ListModels(c *gin.Context, modelType int) {
 			tokenModelLimit = map[string]bool{}
 		}
 	}
-	models := service.GetGroupsEnabledModels(ownerGroups)
-	for _, modelName := range models {
-		if modelLimitEnable {
-			matchingName := ratio_setting.RoutingMatchModelName(modelName)
-			if !tokenModelLimit[modelName] && !tokenModelLimit[matchingName] {
-				continue
-			}
+
+	return visibleModelContext{
+		acceptUnsetRatioModel: acceptUnsetRatioModel,
+		ownerGroups:           groups.ownerGroups,
+		modelLimitEnable:      modelLimitEnable,
+		tokenModelLimit:       tokenModelLimit,
+	}, nil
+}
+
+func (v visibleModelContext) allowsModel(modelName string) bool {
+	if v.modelLimitEnable {
+		matchingName := ratio_setting.RoutingMatchModelName(modelName)
+		if !v.tokenModelLimit[modelName] && !v.tokenModelLimit[matchingName] {
+			return false
 		}
-		if !acceptUnsetRatioModel && !helper.HasModelBillingConfig(modelName) {
+	}
+	if !v.acceptUnsetRatioModel && !helper.HasModelBillingConfig(modelName) {
+		return false
+	}
+	return true
+}
+
+func toAnthropicModel(aiModel dto.OpenAIModels) dto.AnthropicModel {
+	return dto.AnthropicModel{
+		ID:          aiModel.Id,
+		CreatedAt:   time.Unix(int64(aiModel.Created), 0).UTC().Format(time.RFC3339),
+		DisplayName: aiModel.Id,
+		Type:        "model",
+	}
+}
+
+func toGeminiModel(aiModel dto.OpenAIModels) dto.GeminiModel {
+	return dto.GeminiModel{
+		Name:        aiModel.Id,
+		DisplayName: aiModel.Id,
+	}
+}
+
+func ListModels(c *gin.Context, modelType int) {
+	visCtx, err := resolveVisibleModelContext(c)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "get user group failed",
+		})
+		return
+	}
+
+	userModelNames := make([]string, 0)
+	models := service.GetGroupsEnabledModels(visCtx.ownerGroups)
+	for _, modelName := range models {
+		if !visCtx.allowsModel(modelName) {
 			continue
 		}
 		userModelNames = append(userModelNames, modelName)
 	}
 
 	ownerByModel := map[string]string{}
-	if len(ownerGroups) > 0 {
-		ownerByModel = getPreferredModelOwners(userModelNames, ownerGroups)
+	if len(visCtx.ownerGroups) > 0 {
+		ownerByModel = getPreferredModelOwners(userModelNames, visCtx.ownerGroups)
 	}
 	userOpenAiModels := make([]dto.OpenAIModels, 0, len(userModelNames))
 	for _, modelName := range userModelNames {
@@ -275,12 +321,7 @@ func ListModels(c *gin.Context, modelType int) {
 	case constant.ChannelTypeAnthropic:
 		useranthropicModels := make([]dto.AnthropicModel, len(userOpenAiModels))
 		for i, model := range userOpenAiModels {
-			useranthropicModels[i] = dto.AnthropicModel{
-				ID:          model.Id,
-				CreatedAt:   time.Unix(int64(model.Created), 0).UTC().Format(time.RFC3339),
-				DisplayName: model.Id,
-				Type:        "model",
-			}
+			useranthropicModels[i] = toAnthropicModel(model)
 		}
 		firstID := ""
 		lastID := ""
@@ -297,10 +338,7 @@ func ListModels(c *gin.Context, modelType int) {
 	case constant.ChannelTypeGemini:
 		userGeminiModels := make([]dto.GeminiModel, len(userOpenAiModels))
 		for i, model := range userOpenAiModels {
-			userGeminiModels[i] = dto.GeminiModel{
-				Name:        model.Id,
-				DisplayName: model.Id,
-			}
+			userGeminiModels[i] = toGeminiModel(model)
 		}
 		c.JSON(200, gin.H{
 			"models":        userGeminiModels,
@@ -345,29 +383,81 @@ func EnabledListModels(c *gin.Context) {
 	})
 }
 
+func writeRetrieveModelError(c *gin.Context, modelType int, statusCode int, claudeType string, openAIType string, openAICode string, param string, message string) {
+	switch modelType {
+	case constant.ChannelTypeAnthropic:
+		c.JSON(statusCode, gin.H{
+			"type": "error",
+			"error": types.ClaudeError{
+				Type:    claudeType,
+				Message: message,
+			},
+		})
+	default:
+		c.JSON(statusCode, gin.H{
+			"error": types.OpenAIError{
+				Message: message,
+				Type:    openAIType,
+				Param:   param,
+				Code:    openAICode,
+			},
+		})
+	}
+}
+
+func writeRetrieveModelNotFound(c *gin.Context, modelType int, modelId string) {
+	writeRetrieveModelError(
+		c,
+		modelType,
+		http.StatusNotFound,
+		"not_found_error",
+		"invalid_request_error",
+		"model_not_found",
+		"model",
+		fmt.Sprintf("The model '%s' does not exist", modelId),
+	)
+}
+
 func RetrieveModel(c *gin.Context, modelType int) {
 	modelId := c.Param("model")
-	if aiModel, ok := openAIModelsMap[modelId]; ok {
-		switch modelType {
-		case constant.ChannelTypeAnthropic:
-			c.JSON(200, dto.AnthropicModel{
-				ID:          aiModel.Id,
-				CreatedAt:   time.Unix(int64(aiModel.Created), 0).UTC().Format(time.RFC3339),
-				DisplayName: aiModel.Id,
-				Type:        "model",
-			})
-		default:
-			c.JSON(200, aiModel)
-		}
-	} else {
-		openAIError := types.OpenAIError{
-			Message: fmt.Sprintf("The model '%s' does not exist", modelId),
-			Type:    "invalid_request_error",
-			Param:   "model",
-			Code:    "model_not_found",
-		}
-		c.JSON(200, gin.H{
-			"error": openAIError,
-		})
+	visCtx, err := resolveVisibleModelContext(c)
+	if err != nil {
+		writeRetrieveModelError(
+			c,
+			modelType,
+			http.StatusInternalServerError,
+			"api_error",
+			string(types.ErrorTypeNewAPIError),
+			"get_user_group_failed",
+			"",
+			"get user group failed",
+		)
+		return
+	}
+
+	if modelId == "" {
+		writeRetrieveModelNotFound(c, modelType, modelId)
+		return
+	}
+
+	models := service.GetGroupsEnabledModels(visCtx.ownerGroups)
+	if !slices.Contains(models, modelId) || !visCtx.allowsModel(modelId) {
+		writeRetrieveModelNotFound(c, modelType, modelId)
+		return
+	}
+
+	ownerByModel := map[string]string{}
+	if len(visCtx.ownerGroups) > 0 {
+		ownerByModel = getPreferredModelOwners([]string{modelId}, visCtx.ownerGroups)
+	}
+	aiModel := buildOpenAIModel(modelId, ownerByModel)
+
+	switch modelType {
+	case constant.ChannelTypeAnthropic:
+		c.JSON(http.StatusOK, toAnthropicModel(aiModel))
+	case constant.ChannelTypeGemini:
+		c.JSON(http.StatusOK, toGeminiModel(aiModel))
+	default:
+		c.JSON(http.StatusOK, aiModel)
 	}
 }
