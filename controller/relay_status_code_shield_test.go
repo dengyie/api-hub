@@ -87,12 +87,15 @@ func TestUpstreamChannelErrorStatusShielding(t *testing.T) {
 			expectedStatus: http.StatusServiceUnavailable,
 		},
 		{
-			name:           "upstream 400 tool call state lost mapped to 503",
+			// 2026-11-10 根修：stale tool-call 错误终结为 400，不再盾标 503。
+			// 503 会让客户端 SDK 指数退避重试一个永远不可能成功的请求（生产实测
+			// #248 同一死 call_id 两小时被重打 90 次）；4xx 才能让客户端停下。
+			name:           "upstream 400 tool call state lost stays 400 (no retry bait)",
 			useChannel:     []string{"155"},
 			errorCode:      types.ErrorCodeBadResponseStatusCode,
 			statusCode:     http.StatusBadRequest,
 			errMessage:     "找不到可消费的工具调用状态：call_id=call_qGRzoQMDDF3pXgOX7gt6TFaw",
-			expectedStatus: http.StatusServiceUnavailable,
+			expectedStatus: http.StatusBadRequest,
 		},
 		{
 			name:           "downstream client malformed request remains 400",
