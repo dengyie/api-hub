@@ -204,6 +204,8 @@ func TestMagpieGatewayModelsAreAllPriced(t *testing.T) {
 		"max-model",
 		"deepseek-v4.1-flash-sg",
 		"glm-5-turbo",
+		"hy3",
+		"hy3-free",
 		"hy3-x",
 		"hy4",
 		"hy4std",
@@ -226,6 +228,38 @@ func TestMagpieGatewayModelsAreAllPriced(t *testing.T) {
 			require.NoError(t, err, "%s expression failed smoke test", name)
 		})
 	}
+
+	t.Run("hy3 and hy4 canonical models bill as zero-quota free tier while paid variants stay standard", func(t *testing.T) {
+		usage := &dto.Usage{PromptTokens: 10000, CompletionTokens: 2000}
+		for _, tc := range []struct {
+			model    string
+			wantTier string
+			wantFree bool
+		}{
+			{"hy3", "free", true},
+			{"hy3-free", "free", true},
+			{"hy4", "free", true},
+			{"hy4free", "free", true},
+			{"hy3-x", "standard", false},
+			{"hy4std", "standard", false},
+		} {
+			t.Run(tc.model, func(t *testing.T) {
+				expression, ok := billing_setting.GetBillingExpr(tc.model)
+				require.True(t, ok)
+				params := service.BuildTieredTokenParams(usage, false, billingexpr.UsedVars(expression))
+				result, err := billingexpr.ComputeTieredQuotaWithRequest(&billingexpr.BillingSnapshot{
+					ExprString: expression, ExprHash: billingexpr.ExprHashString(expression), GroupRatio: 1, QuotaPerUnit: 500000,
+				}, params, billingexpr.RequestInput{Body: []byte(`{}`)})
+				require.NoError(t, err)
+				assert.Equal(t, tc.wantTier, result.MatchedTier)
+				if tc.wantFree {
+					assert.Equal(t, 0, result.ActualQuotaAfterGroup)
+				} else {
+					assert.Greater(t, result.ActualQuotaAfterGroup, 0)
+				}
+			})
+		}
+	})
 }
 
 func TestAllBuiltinBillingExpressionsSmokeTest(t *testing.T) {
