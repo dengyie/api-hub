@@ -103,6 +103,15 @@ func executeRelayAttempt(
 		return relayAttemptOutcome{Success: false, WillRetry: false, Err: clientErr}
 	}
 
+	channel, channelErr := getChannel(c, relayInfo, retryParam)
+	if channelErr != nil {
+		logger.LogError(c, channelErr.Error())
+		if retryParam.GetRetry() > 0 && relayInfo.LastError != nil {
+			return relayAttemptOutcome{Success: false, WillRetry: false, Err: relayInfo.LastError}
+		}
+		return relayAttemptOutcome{Success: false, WillRetry: false, Err: channelErr}
+	}
+
 	relayInfo.StreamStatus = nil
 	// think_tag_to_reasoning 的跨帧状态机按渠道开关生效，换渠道重试不得继承上一渠道的相位
 	relayInfo.ThinkTagSplit = relaycommon.ThinkTagSplitState{}
@@ -111,12 +120,6 @@ func executeRelayAttempt(
 	relayInfo.PerformanceBusinessRejection = false
 	relayInfo.PerformanceOutputTokens = 0
 	relayInfo.RetryIndex = retryParam.GetRetry()
-
-	channel, channelErr := getChannel(c, relayInfo, retryParam)
-	if channelErr != nil {
-		logger.LogError(c, channelErr.Error())
-		return relayAttemptOutcome{Success: false, WillRetry: false, Err: channelErr}
-	}
 
 	// 智能负载：本轮尝试计入 inflight。原先只有流式路径在 scanner 里
 	// Begin/End，非流式与任务请求对 max_inflight 完全不可见，并发上限形同

@@ -158,3 +158,45 @@ func withDebugEnabled(t *testing.T, enabled bool) {
 		common.DebugEnabled = oldDebug
 	})
 }
+
+func TestTaskErrorWrappersHandleNilCause(t *testing.T) {
+	t.Parallel()
+
+	wrapped := TaskErrorWrapper(nil, "empty_cause", http.StatusServiceUnavailable)
+	require.NotNil(t, wrapped)
+	require.Equal(t, "empty_cause", wrapped.Code)
+	require.Equal(t, http.StatusServiceUnavailable, wrapped.StatusCode)
+	require.False(t, wrapped.LocalError)
+	require.Empty(t, wrapped.Message)
+	require.Nil(t, wrapped.Error)
+
+	local := TaskErrorWrapperLocal(nil, "empty_local", http.StatusBadRequest)
+	require.NotNil(t, local)
+	require.True(t, local.LocalError)
+	require.Equal(t, http.StatusBadRequest, local.StatusCode)
+
+	apiErr := types.WithOpenAIError(types.OpenAIError{
+		Message: "upstream gateway failed",
+		Type:    "upstream_error",
+		Code:    "upstream_error",
+	}, http.StatusBadGateway)
+	taskErrWithCause := TaskErrorFromAPIError(apiErr)
+	require.NotNil(t, taskErrWithCause)
+	require.Equal(t, "upstream gateway failed", taskErrWithCause.Message)
+	require.Equal(t, http.StatusBadGateway, taskErrWithCause.StatusCode)
+
+	apiErr.Err = nil
+	taskErr := TaskErrorFromAPIError(apiErr)
+	require.NotNil(t, taskErr)
+	require.Equal(t, "upstream_error", taskErr.Message)
+	require.Equal(t, http.StatusBadGateway, taskErr.StatusCode)
+	require.NotNil(t, taskErr.Error)
+	require.Equal(t, "upstream_error", taskErr.Error.Error())
+
+	emptyErr := types.NewError(nil, types.ErrorCodeNoAvailableChannel, types.ErrOptionWithStatusCode(http.StatusServiceUnavailable))
+	emptyTaskErr := TaskErrorFromAPIError(emptyErr)
+	require.NotNil(t, emptyTaskErr)
+	require.Equal(t, http.StatusServiceUnavailable, emptyTaskErr.StatusCode)
+	require.Equal(t, string(types.ErrorCodeNoAvailableChannel), emptyTaskErr.Message)
+	require.Nil(t, TaskErrorFromAPIError(nil))
+}

@@ -198,7 +198,10 @@ func TaskErrorWrapperLocal(err error, code string, statusCode int) *taskdto.Task
 }
 
 func TaskErrorWrapper(err error, code string, statusCode int) *taskdto.TaskError {
-	text := err.Error()
+	text := ""
+	if err != nil {
+		text = err.Error()
+	}
 	lowerText := strings.ToLower(text)
 	if strings.Contains(lowerText, "post") || strings.Contains(lowerText, "dial") || strings.Contains(lowerText, "http") {
 		common.SysLog(fmt.Sprintf("error: %s", text))
@@ -221,10 +224,15 @@ func TaskErrorFromAPIError(apiErr *types.NewAPIError) *taskdto.TaskError {
 	if apiErr == nil {
 		return nil
 	}
+	cause := apiErr.Err
+	msg := apiErr.Error()
+	if cause == nil && msg != "" {
+		cause = errors.New(msg)
+	}
 	return &taskdto.TaskError{
 		Code:       string(apiErr.GetErrorCode()),
-		Message:    apiErr.Err.Error(),
+		Message:    msg,
 		StatusCode: apiErr.StatusCode,
-		Error:      apiErr.Err,
+		Error:      cause,
 	}
 }

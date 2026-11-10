@@ -21,6 +21,7 @@ import (
 	"github.com/dengyie/apihub/relaykit/types"
 	"github.com/dengyie/apihub/service"
 	"github.com/dengyie/apihub/setting/operation_setting"
+	"github.com/dengyie/apihub/setting/ratio_setting"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -679,5 +680,98 @@ func TestResponsesWSErrorAttribution(t *testing.T) {
 			assert.Equal(t, tc.ambiguous, ambiguous)
 			assert.Equal(t, tc.controlError, controlError)
 		})
+	}
+}
+
+func TestResponsesWSRunCallPreservesLastErrorWhenRetrySelectionExhausted(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	require.NoError(t, i18n.Init())
+	database := setupRelayChannelDB(t)
+	require.NoError(t, database.AutoMigrate(&model.Ability{}, &model.UserSubscription{}))
+
+	prevRetry := common.RetryTimesOption()
+	common.SetRetryTimesOption(1)
+	t.Cleanup(func() { common.SetRetryTimesOption(prevRetry) })
+
+	prevGroupRatios := ratio_setting.GroupRatio2JSONString()
+	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"default":0}`))
+	t.Cleanup(func() { _ = ratio_setting.UpdateGroupRatioByJSONString(prevGroupRatios) })
+
+	prevModelPrices := ratio_setting.ModelPrice2JSONString()
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"gpt-4o":0}`))
+	t.Cleanup(func() { _ = ratio_setting.UpdateModelPriceByJSONString(prevModelPrices) })
+
+	qs := operation_setting.GetQuotaSetting()
+	prevQuota := *qs
+	qs.EnableFreeModelPreConsume = false
+	t.Cleanup(func() { *qs = prevQuota })
+
+	prevErrorLog := constant.ErrorLogEnabled
+	constant.ErrorLogEnabled = false
+	t.Cleanup(func() { constant.ErrorLogEnabled = prevErrorLog })
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer upstream.Close()
+
+	ch := &model.Channel{
+		Name:     "ws-fail-upstream",
+		Key:      "sk-ws-test",
+		Status:   common.ChannelStatusEnabled,
+		Type:     constant.ChannelTypeOpenAI,
+		Group:    "default",
+		Models:   "gpt-4o",
+		BaseURL:  &upstream.URL,
+		Priority: common.GetPointer(int64(0)),
+	}
+	ch.SetSetting(dto.ChannelSettings{ResponsesWebSocketEnabled: true})
+	require.NoError(t, database.Create(ch).Error)
+	require.NoError(t, database.Create(&model.Ability{
+		ChannelId: ch.Id,
+		Model:     "gpt-4o",
+		Group:     "default",
+		Enabled:   true,
+		Priority:  ch.Priority,
+	}).Error)
+
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-4o","input":"ping"}`))
+	c.Set("id", 1)
+	c.Set("role", common.RoleCommonUser)
+	common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+	common.SetContextKey(c, constant.ContextKeyUserGroup, "default")
+	common.SetContextKey(c, constant.ContextKeyTokenModelLimitEnabled, false)
+
+	client, server, cleanup := newTestWebSocketPair(t)
+	defer cleanup()
+	_ = client
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &responsesWSSession{
+		ctx:    ctx,
+		cancel: cancel,
+		client: server,
+	}
+	state := &responsesWSCallState{
+		inbox: make(chan responsesWSMessage, 1),
+		done:  make(chan struct{}),
+	}
+	create, _, err := normalizeResponsesWSTestMessage([]byte(`{"type":"response.create","response":{"model":"gpt-4o","input":"ping"}}`))
+	require.NoError(t, err)
+
+	apiErr := s.runCall(c, state, create)
+	require.NotNil(t, apiErr)
+	assert.Equal(t, types.ErrorCodeDoRequestFailed, apiErr.GetErrorCode(), "retry exhaustion must return upstream dial error rather than no_available_channel: %s", apiErr.Error())
+	assert.NotEqual(t, http.StatusServiceUnavailable, apiErr.StatusCode)
+	infoVal, exists := c.Get(string(constant.ContextKeyRelayInfo))
+	require.True(t, exists)
+	info, ok := infoVal.(*relaycommon.RelayInfo)
+	require.True(t, ok)
+	require.NotNil(t, info.LastError)
+	assert.Equal(t, apiErr, info.LastError)
+	if storage, err := common.GetBodyStorage(c); err == nil {
+		_ = storage.Close()
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 	appdto "github.com/dengyie/apihub/dto"
 	"github.com/dengyie/apihub/i18n"
 	"github.com/dengyie/apihub/loadbalancer"
+	"github.com/dengyie/apihub/logger"
 	"github.com/dengyie/apihub/middleware"
 	appmodel "github.com/dengyie/apihub/model"
 	perfmetrics "github.com/dengyie/apihub/pkg/perf_metrics"
@@ -241,6 +243,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 	billingPrepared := false
 	defer func() {
 		if recovered := recover(); recovered != nil {
+			logger.LogError(c, fmt.Sprintf("responses websocket call panic: %v\n%s", recovered, debug.Stack()))
 			apiErr = types.NewError(fmt.Errorf("responses websocket call panic: %v", recovered), types.ErrorCodeBadResponse, types.ErrOptionWithSkipRetry())
 			state.closeAfter = true
 		}
@@ -299,10 +302,13 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 	} else {
 		retry := &service.RetryParam{Ctx: c, TokenGroup: common.GetContextKeyString(c, appconstant.ContextKeyUsingGroup), ModelName: modelName, RequestPath: c.Request.URL.Path, Retry: common.GetPointer(0)}
 		for ; retry.GetRetry() <= common.RetryTimes(); retry.IncreaseRetry() {
-			var channel *appmodel.Channel
-			channel, apiErr = selectResponsesWSChannel(c, modelName, retry)
-			if apiErr != nil {
-				return apiErr
+			channel, selectErr := selectResponsesWSChannel(c, modelName, retry)
+			if selectErr != nil {
+				logger.LogError(c, selectErr.Error())
+				if info != nil && info.LastError != nil {
+					return info.LastError
+				}
+				return selectErr
 			}
 			service.AppendUsedChannel(c, channel.Id)
 			if info == nil {
@@ -368,6 +374,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			}
 			s.registerChannelClose(channel.Id)
 			s.startTargetReader(target)
+			info.LastError = nil
 			apiErr = nil
 			break
 		}

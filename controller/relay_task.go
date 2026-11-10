@@ -118,8 +118,11 @@ func executeTaskSubmissionWith(
 		RequestPath: c.Request.URL.Path,
 		Retry:       common.GetPointer(0),
 	}
+	relayInfo.RetryIndex = 0
+	relayInfo.LastError = nil
 
 	for ; retryParam.GetRetry() <= common.RetryTimes(); retryParam.IncreaseRetry() {
+		prevStage := stage
 		stage = "select_channel"
 		if requestErr := c.Request.Context().Err(); requestErr != nil {
 			diagnostics.cancelled("before_attempt", retryParam.GetRetry()+1)
@@ -130,22 +133,52 @@ func executeTaskSubmissionWith(
 
 		if lockedCh, ok := relayInfo.LockedChannel.(*model.Channel); ok && lockedCh != nil {
 			channel = lockedCh
-			policy.BeginAttempt(channel, relayInfo.UsingGroup)
 			if retryParam.GetRetry() > 0 {
 				if setupErr := middleware.SetupContextForSelectedChannel(c, channel, relayInfo.OriginModelName); setupErr != nil {
-					taskErr = service.TaskErrorWrapperLocal(setupErr.Err, "setup_locked_channel_failed", http.StatusInternalServerError)
+					logger.LogError(c, setupErr.Error())
+					if taskErr != nil {
+						stage = prevStage
+						break
+					}
+					statusCode := setupErr.StatusCode
+					if statusCode == 0 {
+						statusCode = http.StatusInternalServerError
+					}
+					cause := setupErr.Err
+					if cause == nil {
+						cause = errors.New(setupErr.Error())
+					}
+					taskErr = service.TaskErrorWrapperLocal(cause, "setup_locked_channel_failed", statusCode)
 					break
 				}
 			}
+			policy.BeginAttempt(channel, relayInfo.UsingGroup)
 		} else {
 			var channelErr *types.NewAPIError
 			channel, channelErr = getChannel(c, relayInfo, retryParam)
 			if channelErr != nil {
 				logger.LogError(c, channelErr.Error())
-				taskErr = service.TaskErrorWrapperLocal(channelErr.Err, "get_channel_failed", channelErr.StatusCode)
+				if retryParam.GetRetry() > 0 && taskErr != nil {
+					stage = prevStage
+					break
+				}
+				statusCode := channelErr.StatusCode
+				if statusCode == 0 {
+					statusCode = http.StatusServiceUnavailable
+				}
+				cause := channelErr.Err
+				if cause == nil {
+					cause = errors.New(channelErr.Error())
+				}
+				code := string(channelErr.GetErrorCode())
+				if code == "" {
+					code = "get_channel_failed"
+				}
+				taskErr = service.TaskErrorWrapperLocal(cause, code, statusCode)
 				break
 			}
 		}
+		relayInfo.RetryIndex = retryParam.GetRetry()
 		diagnostics.attempt(retryParam.GetRetry()+1, channel, relayInfo.LockedChannel != nil)
 
 		// 智能负载：任务提交同样计入 inflight（见 Relay 中的同名注释）
@@ -185,6 +218,7 @@ func executeTaskSubmissionWith(
 			break
 		}
 		if taskErr == nil {
+			relayInfo.LastError = nil
 			diagnostics.attemptSucceeded(retryParam.GetRetry()+1, result)
 			lbAttempt.End(false, false)
 			break

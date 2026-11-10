@@ -283,25 +283,40 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 		return channel, nil
 	}
 	channel, selectGroup, err := service.SelectRetryChannel(retryParam)
+	displayGroup := selectGroup
+	if displayGroup == "" {
+		displayGroup = retryParam.TokenGroup
+	}
 	if err != nil {
-		return nil, types.NewError(fmt.Errorf("获取分组 %s 下模型 %s 的可用渠道失败（retry）: %s", selectGroup, info.OriginModelName, err.Error()), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+		return nil, types.NewErrorWithStatusCode(
+			fmt.Errorf("获取分组 %s 下模型 %s 的可用渠道失败（retry）: %s", displayGroup, info.OriginModelName, err.Error()),
+			types.ErrorCodeGetChannelFailed,
+			http.StatusServiceUnavailable,
+			types.ErrOptionWithSkipRetry(),
+		)
 	}
 	if channel == nil {
 		// 重试轮选不出任何渠道：与首轮 SelectChannelForRequest 的 channel==nil
 		// 分支同源，记一条 MODEL_EXHAUSTED 聚合证据。全部渠道在首轮之后才被
 		// 熔断/打满的场景，此前在这里是安静的——「模型对外已不可用」没有任何
 		// 可 grep 的信号，夜间全池挂掉只能等客户端报障。
-		loadbalancer.RecordModelExhausted(info.OriginModelName, fmt.Sprintf("retry group=%s", selectGroup))
-		return nil, types.NewError(fmt.Errorf("分组 %s 下模型 %s 的可用渠道不存在（retry）", selectGroup, info.OriginModelName), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+		loadbalancer.RecordModelExhausted(info.OriginModelName, fmt.Sprintf("retry group=%s", displayGroup))
+		return nil, types.NewErrorWithStatusCode(
+			fmt.Errorf("分组 %s 下模型 %s 的可用渠道不存在（retry）", displayGroup, info.OriginModelName),
+			types.ErrorCodeNoAvailableChannel,
+			http.StatusServiceUnavailable,
+			types.ErrOptionWithSkipRetry(),
+		)
+	}
+
+	newAPIError := middleware.SetupContextForSelectedChannel(c, channel, info.OriginModelName)
+	if newAPIError != nil {
+		return nil, newAPIError
 	}
 
 	info.PriceData.GroupRatioInfo = helper.HandleGroupRatio(c, info)
 
 	service.RequestPolicy(c).BeginAttempt(channel, selectGroup)
-	newAPIError := middleware.SetupContextForSelectedChannel(c, channel, info.OriginModelName)
-	if newAPIError != nil {
-		return nil, newAPIError
-	}
 	return channel, nil
 }
 
