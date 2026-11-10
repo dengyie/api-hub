@@ -170,6 +170,11 @@ export function ChannelQuickOptions(props: ChannelQuickOptionsProps) {
     knownModes.includes(clientFingerprint as (typeof knownModes)[number])
       ? (clientFingerprint as (typeof knownModes)[number])
       : 'auto'
+  const fingerprintItems = [
+    { value: 'codex', label: t('Codex CLI') },
+    { value: 'claude', label: t('Claude Code') },
+    { value: 'off', label: t('Off (bare client)') },
+  ] as const
   options.push({
     key: 'client-disguise',
     label: t('Client Disguise'),
@@ -186,6 +191,8 @@ export function ChannelQuickOptions(props: ChannelQuickOptionsProps) {
     trailing:
       fingerprintMode !== 'auto' ? (
         <Select
+          disabled={props.disabled}
+          items={fingerprintItems}
           value={fingerprintMode}
           onValueChange={(mode) =>
             form.setValue(
@@ -199,9 +206,11 @@ export function ChannelQuickOptions(props: ChannelQuickOptionsProps) {
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value='codex'>{t('Codex CLI')}</SelectItem>
-            <SelectItem value='claude'>{t('Claude Code')}</SelectItem>
-            <SelectItem value='off'>{t('Off (bare client)')}</SelectItem>
+            {fingerprintItems.map((item) => (
+              <SelectItem key={item.value} value={item.value}>
+                {item.label}
+              </SelectItem>
+            ))}
           </SelectContent>
         </Select>
       ) : undefined,

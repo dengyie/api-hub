@@ -49,6 +49,8 @@ type HarnessProps = {
   channelType?: number
   layout?: 'stacked' | 'inline'
   values?: Partial<ChannelFormValues>
+  sensitiveLocked?: boolean
+  disabled?: boolean
   confirm: (kind: PassthroughKind) => Promise<boolean>
   onSave?: (values: ChannelFormValues) => void
 }
@@ -80,8 +82,8 @@ function QuickOptionsHarness(props: HarnessProps) {
           >
             <ChannelQuickOptions
               channelType={channelType}
-              sensitiveLocked={false}
-              disabled={false}
+              sensitiveLocked={props.sensitiveLocked ?? false}
+              disabled={props.disabled ?? false}
               layout={props.layout}
               confirmEnablePassthrough={props.confirm}
             />
@@ -308,4 +310,97 @@ describe('responses websocket quick option', () => {
       ).not.toBeInTheDocument()
     }
   )
+})
+
+const DISGUISE_SWITCH = { name: 'Client Disguise' }
+
+describe('client disguise quick option', () => {
+  test('is unchecked by default with no trailing select in stacked layout', () => {
+    render(
+      <QuickOptionsHarness
+        confirm={() => Promise.resolve(true)}
+      />
+    )
+    const toggle = screen.getByRole('switch', DISGUISE_SWITCH)
+    expect(toggle).not.toBeChecked()
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument()
+  })
+
+  test('renders trailing select dropdown in stacked layout when client_fingerprint is configured', () => {
+    render(
+      <QuickOptionsHarness
+        values={{ client_fingerprint: 'codex' }}
+        confirm={() => Promise.resolve(true)}
+      />
+    )
+    const toggle = screen.getByRole('switch', DISGUISE_SWITCH)
+    expect(toggle).toBeChecked()
+    expect(screen.getByRole('combobox')).toBeVisible()
+    expect(screen.getByText('Codex CLI')).toBeInTheDocument()
+  })
+
+  test('toggling on sets mode to codex and reveals select', async () => {
+    const user = userEvent.setup()
+    const saved: ChannelFormValues[] = []
+    render(
+      <QuickOptionsHarness
+        confirm={() => Promise.resolve(true)}
+        onSave={(values) => saved.push(values)}
+      />
+    )
+    const toggle = screen.getByRole('switch', DISGUISE_SWITCH)
+    await user.click(toggle)
+    expect(toggle).toBeChecked()
+    expect(screen.getByRole('combobox')).toBeVisible()
+
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(saved).toHaveLength(1))
+    expect(saved[0].client_fingerprint).toBe('codex')
+  })
+
+  test('select trigger is disabled when disabled prop is true', () => {
+    render(
+      <QuickOptionsHarness
+        values={{ client_fingerprint: 'codex' }}
+        disabled
+        confirm={() => Promise.resolve(true)}
+      />
+    )
+    expect(screen.getByRole('switch', DISGUISE_SWITCH)).toHaveAttribute(
+      'aria-disabled',
+      'true'
+    )
+    expect(screen.getByRole('combobox')).toBeDisabled()
+  })
+
+  test('changes fingerprint mode from codex to claude and off via select dropdown', async () => {
+    const user = userEvent.setup()
+    const saved: ChannelFormValues[] = []
+    render(
+      <QuickOptionsHarness
+        values={{ client_fingerprint: 'codex' }}
+        confirm={() => Promise.resolve(true)}
+        onSave={(values) => saved.push(values)}
+      />
+    )
+    await user.click(screen.getByRole('combobox'))
+    await user.click(await screen.findByRole('option', { name: 'Claude Code' }))
+    expect(screen.getByRole('switch', DISGUISE_SWITCH)).toBeChecked()
+    expect(screen.getByRole('combobox')).toHaveTextContent('Claude Code')
+
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(saved).toHaveLength(1))
+    expect(saved[0].client_fingerprint).toBe('claude')
+
+    await user.click(screen.getByRole('combobox'))
+    await user.click(
+      await screen.findByRole('option', { name: 'Off (bare client)' })
+    )
+    expect(screen.getByRole('switch', DISGUISE_SWITCH)).not.toBeChecked()
+    expect(screen.getByRole('combobox')).toHaveTextContent('Off (bare client)')
+
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(saved).toHaveLength(2))
+    expect(saved[1].client_fingerprint).toBe('off')
+  })
 })

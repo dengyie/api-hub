@@ -115,6 +115,7 @@ export function SettingsSwitchField({
   description,
   disabled,
   className,
+  children,
   ...props
 }: SettingsSwitchFieldProps) {
   return (
@@ -132,15 +133,18 @@ export function SettingsSwitchField({
           </p>
         ) : null}
       </SettingsSwitchContent>
-      <Switch
-        id={controlId}
-        aria-describedby={
-          controlId && description ? `${controlId}-description` : undefined
-        }
-        checked={checked}
-        onCheckedChange={onCheckedChange}
-        disabled={disabled}
-      />
+      <div className='flex items-center gap-2'>
+        {children}
+        <Switch
+          id={controlId}
+          aria-describedby={
+            controlId && description ? `${controlId}-description` : undefined
+          }
+          checked={checked}
+          onCheckedChange={onCheckedChange}
+          disabled={disabled}
+        />
+      </div>
     </SettingsSwitchRow>
   )
 }
