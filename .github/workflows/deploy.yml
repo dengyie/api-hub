@@ -147,7 +147,7 @@ jobs:
     name: Deploy to tebi
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     environment: production
 
     steps:
@@ -206,8 +206,10 @@ jobs:
             IdentitiesOnly yes
             PreferredAuthentications publickey
             StrictHostKeyChecking yes
-            ServerAliveInterval 30
-            ServerAliveCountMax 3
+            ConnectTimeout 15
+            TCPKeepAlive yes
+            ServerAliveInterval 15
+            ServerAliveCountMax 4
           EOF
 
       - name: Check that the host is reachable
@@ -222,16 +224,68 @@ jobs:
           # is correct on the wire rather than correct by luck of a guard clause.
           chmod +x dist/apihub
 
-          ssh tebi 'mkdir -p /tmp/apihub-release'
-          scp dist/apihub tebi:/tmp/apihub-release/apihub
-          scp dist/apihub-web.tar.gz tebi:/tmp/apihub-release/apihub-web.tar.gz
-          scp scripts/deploy.sh tebi:/tmp/apihub-release/deploy.sh
+          # Pack into a single gzipped bundle so the ~130MB Go binary travels
+          # compressed (~60MB) in one transfer instead of four separate scp
+          # sessions, and bound each transfer attempt with a hard timeout so a
+          # stalled cross-border socket fails fast and retries instead of
+          # burning the entire job timeout.
+          stage_dir="$(mktemp -d)"
+          trap 'rm -rf "$stage_dir"' EXIT
+          cp dist/apihub "$stage_dir/apihub"
+          cp dist/apihub-web.tar.gz "$stage_dir/apihub-web.tar.gz"
+          cp scripts/deploy.sh "$stage_dir/deploy.sh"
           # deploy.sh installs this next to itself and registers it as a
           # supervisord program, so the running guard is never an older version
           # than the one in this commit. Without the upload, install_slot_guard
           # skips and the guard goes unmanaged again -- which is exactly how the
           # hand-armed version disappeared.
-          scp scripts/slot-watchdog.sh tebi:/tmp/apihub-release/slot-watchdog.sh
+          cp scripts/slot-watchdog.sh "$stage_dir/slot-watchdog.sh"
+          chmod +x "$stage_dir/apihub" "$stage_dir/deploy.sh" "$stage_dir/slot-watchdog.sh"
+
+          bundle="$stage_dir/release.tar.gz"
+          tar -C "$stage_dir" -cf - apihub apihub-web.tar.gz deploy.sh slot-watchdog.sh | gzip -1 > "$bundle"
+          expected_sha="$(sha256sum "$bundle" | awk '{print $1}')"
+          bundle_bytes="$(stat -c %s "$bundle")"
+          echo "release bundle: ${bundle_bytes} bytes, sha256=${expected_sha}"
+
+          ssh -o BatchMode=yes tebi 'mkdir -p /tmp/apihub-release && rm -f /tmp/apihub-release/release.tar.gz.part'
+
+          uploaded=0
+          for attempt in 1 2 3; do
+            echo "upload attempt ${attempt}/3..."
+            if [ "$attempt" -eq 1 ]; then
+              if timeout --kill-after=10 180 scp -o BatchMode=yes "$bundle" tebi:/tmp/apihub-release/release.tar.gz.part; then
+                uploaded=1
+              fi
+            else
+              # Fall back to raw SSH stdin streaming on retries in case the SFTP
+              # data channel stalled on the cross-border path.
+              if timeout --kill-after=10 180 ssh -o BatchMode=yes tebi 'cat > /tmp/apihub-release/release.tar.gz.part' < "$bundle"; then
+                uploaded=1
+              fi
+            fi
+
+            if [ "$uploaded" -eq 1 ]; then
+              remote_sha="$(ssh -o BatchMode=yes tebi 'sha256sum /tmp/apihub-release/release.tar.gz.part' | awk '{print $1}' || true)"
+              if [ -n "$remote_sha" ] && [ "$remote_sha" = "$expected_sha" ]; then
+                break
+              fi
+              echo "::warning::uploaded bundle sha256 mismatch (want ${expected_sha}, got ${remote_sha}); retrying"
+              uploaded=0
+            else
+              echo "::warning::upload attempt ${attempt}/3 failed or timed out"
+            fi
+
+            ssh -o BatchMode=yes tebi 'rm -f /tmp/apihub-release/release.tar.gz.part' || true
+            sleep 5
+          done
+
+          if [ "$uploaded" -ne 1 ]; then
+            echo "::error::failed to upload release bundle after 3 attempts"
+            exit 1
+          fi
+
+          ssh tebi 'tar -xzf /tmp/apihub-release/release.tar.gz.part -C /tmp/apihub-release && rm -f /tmp/apihub-release/release.tar.gz.part && chmod +x /tmp/apihub-release/apihub /tmp/apihub-release/deploy.sh /tmp/apihub-release/slot-watchdog.sh'
 
       - name: Deploy
         env:
