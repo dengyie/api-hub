@@ -147,7 +147,7 @@ jobs:
     name: Deploy to tebi
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     environment: production
 
     steps:
@@ -208,8 +208,8 @@ jobs:
             StrictHostKeyChecking yes
             ConnectTimeout 15
             TCPKeepAlive yes
-            ServerAliveInterval 15
-            ServerAliveCountMax 4
+            ServerAliveInterval 10
+            ServerAliveCountMax 3
           EOF
 
       - name: Check that the host is reachable
@@ -224,13 +224,55 @@ jobs:
           # is correct on the wire rather than correct by luck of a guard clause.
           chmod +x dist/apihub
 
-          # Pack into a single gzipped bundle so the ~130MB Go binary travels
-          # compressed (~60MB) in one transfer instead of four separate scp
-          # sessions, and bound each transfer attempt with a hard timeout so a
-          # stalled cross-border socket fails fast and retries instead of
-          # burning the entire job timeout.
+          # Pack into a single compressed bundle (~51MB with zstd -19 vs ~155MB raw
+          # or ~66.5MB gzip -1) and upload it as 2MiB SHA-256-verified chunks over
+          # an SSH ControlMaster session. Cross-border US->CN throughput often drops
+          # below 350KB/s or stalls a single TCP flow; chunking bounds any stall to
+          # at most 2MiB, resets the mux socket on failure, and never discards
+          # verified chunks already on tebi.
           stage_dir="$(mktemp -d)"
-          trap 'rm -rf "$stage_dir"' EXIT
+          chunk_dir="$stage_dir/chunks"
+          ctrl_sock="$stage_dir/ssh.sock"
+          master_pid=""
+          close_master() {
+            if [ -S "$ctrl_sock" ]; then
+              timeout 5 ssh -o BatchMode=yes -S "$ctrl_sock" -O exit tebi >/dev/null 2>&1 || true
+            fi
+            if [ -n "$master_pid" ]; then
+              kill "$master_pid" >/dev/null 2>&1 || true
+              wait "$master_pid" >/dev/null 2>&1 || true
+              master_pid=""
+            fi
+            rm -f "$ctrl_sock"
+          }
+          cleanup() {
+            close_master
+            rm -rf "$stage_dir"
+          }
+          trap cleanup EXIT
+
+          ensure_master() {
+            if [ -n "$master_pid" ] && kill -0 "$master_pid" 2>/dev/null && \
+               timeout 5 ssh -o BatchMode=yes -S "$ctrl_sock" -O check tebi >/dev/null 2>&1; then
+              return 0
+            fi
+            close_master
+            ssh -o BatchMode=yes -o ExitOnForwardFailure=yes -M -N -S "$ctrl_sock" tebi </dev/null >/dev/null 2>&1 &
+            master_pid=$!
+            for _ in $(seq 1 30); do
+              if [ -S "$ctrl_sock" ] && timeout 5 ssh -o BatchMode=yes -S "$ctrl_sock" -O check tebi >/dev/null 2>&1; then
+                return 0
+              fi
+              if ! kill -0 "$master_pid" 2>/dev/null; then
+                break
+              fi
+              sleep 0.5
+            done
+            close_master
+            return 1
+          }
+
+          mkdir -p "$chunk_dir"
           cp dist/apihub "$stage_dir/apihub"
           cp dist/apihub-web.tar.gz "$stage_dir/apihub-web.tar.gz"
           cp scripts/deploy.sh "$stage_dir/deploy.sh"
@@ -242,50 +284,111 @@ jobs:
           cp scripts/slot-watchdog.sh "$stage_dir/slot-watchdog.sh"
           chmod +x "$stage_dir/apihub" "$stage_dir/deploy.sh" "$stage_dir/slot-watchdog.sh"
 
-          bundle="$stage_dir/release.tar.gz"
-          tar -C "$stage_dir" -cf - apihub apihub-web.tar.gz deploy.sh slot-watchdog.sh | gzip -1 > "$bundle"
-          expected_sha="$(sha256sum "$bundle" | awk '{print $1}')"
-          bundle_bytes="$(stat -c %s "$bundle")"
-          echo "release bundle: ${bundle_bytes} bytes, sha256=${expected_sha}"
-
-          ssh -o BatchMode=yes tebi 'mkdir -p /tmp/apihub-release && rm -f /tmp/apihub-release/release.tar.gz.part'
-
-          uploaded=0
-          for attempt in 1 2 3; do
-            echo "upload attempt ${attempt}/3..."
-            if [ "$attempt" -eq 1 ]; then
-              if timeout --kill-after=10 180 scp -o BatchMode=yes "$bundle" tebi:/tmp/apihub-release/release.tar.gz.part; then
-                uploaded=1
-              fi
-            else
-              # Fall back to raw SSH stdin streaming on retries in case the SFTP
-              # data channel stalled on the cross-border path.
-              if timeout --kill-after=10 180 ssh -o BatchMode=yes tebi 'cat > /tmp/apihub-release/release.tar.gz.part' < "$bundle"; then
-                uploaded=1
-              fi
-            fi
-
-            if [ "$uploaded" -eq 1 ]; then
-              remote_sha="$(ssh -o BatchMode=yes tebi 'sha256sum /tmp/apihub-release/release.tar.gz.part' | awk '{print $1}' || true)"
-              if [ -n "$remote_sha" ] && [ "$remote_sha" = "$expected_sha" ]; then
-                break
-              fi
-              echo "::warning::uploaded bundle sha256 mismatch (want ${expected_sha}, got ${remote_sha}); retrying"
-              uploaded=0
-            else
-              echo "::warning::upload attempt ${attempt}/3 failed or timed out"
-            fi
-
-            ssh -o BatchMode=yes tebi 'rm -f /tmp/apihub-release/release.tar.gz.part' || true
-            sleep 5
-          done
-
-          if [ "$uploaded" -ne 1 ]; then
-            echo "::error::failed to upload release bundle after 3 attempts"
-            exit 1
+          remote_has_zstd=0
+          if ssh -o BatchMode=yes tebi 'PATH="/opt/mamba/bin:$PATH" command -v zstd >/dev/null 2>&1'; then
+            remote_has_zstd=1
           fi
 
-          ssh tebi 'tar -xzf /tmp/apihub-release/release.tar.gz.part -C /tmp/apihub-release && rm -f /tmp/apihub-release/release.tar.gz.part && chmod +x /tmp/apihub-release/apihub /tmp/apihub-release/deploy.sh /tmp/apihub-release/slot-watchdog.sh'
+          if command -v zstd >/dev/null 2>&1 && [ "$remote_has_zstd" -eq 1 ]; then
+            bundle_ext="tar.zst"
+            bundle="$stage_dir/release.${bundle_ext}"
+            tar -C "$stage_dir" -cf - apihub apihub-web.tar.gz deploy.sh slot-watchdog.sh | zstd -19 -T0 -q -o "$bundle"
+          else
+            bundle_ext="tar.gz"
+            bundle="$stage_dir/release.${bundle_ext}"
+            tar -C "$stage_dir" -cf - apihub apihub-web.tar.gz deploy.sh slot-watchdog.sh | gzip -9 > "$bundle"
+          fi
+
+          expected_sha="$(sha256sum "$bundle" | awk '{print $1}')"
+          bundle_bytes="$(stat -c %s "$bundle")"
+          echo "release bundle (${bundle_ext}): ${bundle_bytes} bytes, sha256=${expected_sha}"
+
+          split -b 2097152 -d -a 4 "$bundle" "$chunk_dir/chunk_"
+          total_chunks="$(find "$chunk_dir" -maxdepth 1 -type f | wc -l | tr -d ' ')"
+          if [ "$total_chunks" -lt 1 ]; then
+            echo "::error::bundle produced 0 chunks"
+            exit 1
+          fi
+          echo "uploading ${total_chunks} chunks (<=2MiB each)..."
+
+          ssh -o BatchMode=yes tebi 'rm -rf /tmp/apihub-release && mkdir -p /tmp/apihub-release/chunks'
+
+          upload_start="$(date +%s)"
+          upload_deadline=$((upload_start + 840))
+
+          for idx in $(seq -f '%04g' 0 $((total_chunks - 1))); do
+            chunk_name="chunk_${idx}"
+            chunk_file="$chunk_dir/$chunk_name"
+            chunk_sha="$(sha256sum "$chunk_file" | awk '{print $1}')"
+            chunk_bytes="$(stat -c %s "$chunk_file")"
+            chunk_ok=0
+
+            for attempt in 1 2 3 4 5; do
+              now="$(date +%s)"
+              if [ "$now" -ge "$upload_deadline" ]; then
+                echo "::error::overall release upload deadline (840s) exceeded at ${chunk_name}"
+                exit 1
+              fi
+
+              if ! ensure_master; then
+                echo "::warning::${chunk_name} attempt ${attempt}/5: ssh master setup failed"
+                sleep 3
+                continue
+              fi
+
+              t0="$(date +%s)"
+              if timeout --kill-after=10 120 ssh -o BatchMode=yes -S "$ctrl_sock" tebi \
+                "set -euo pipefail; \
+                 part='/tmp/apihub-release/chunks/${chunk_name}.part'; \
+                 dest='/tmp/apihub-release/chunks/${chunk_name}'; \
+                 cat > \"\$part\"; \
+                 got=\$(sha256sum \"\$part\" | awk '{print \$1}'); \
+                 [ \"\$got\" = '${chunk_sha}' ] || { rm -f \"\$part\"; exit 1; }; \
+                 mv -f \"\$part\" \"\$dest\"" < "$chunk_file"; then
+                dt=$(( $(date +%s) - t0 ))
+                echo "uploaded ${chunk_name} (${chunk_bytes} B) in ${dt}s (attempt ${attempt})"
+                chunk_ok=1
+                break
+              fi
+
+              echo "::warning::${chunk_name} (${chunk_bytes} B) attempt ${attempt}/5 failed or timed out; resetting ssh connection"
+              close_master
+              sleep 3
+            done
+
+            if [ "$chunk_ok" -ne 1 ]; then
+              echo "::error::failed to upload ${chunk_name} after 5 attempts"
+              exit 1
+            fi
+          done
+
+          close_master
+          total_dt=$(( $(date +%s) - upload_start ))
+          echo "all ${total_chunks} chunks uploaded in ${total_dt}s; reassembling and extracting..."
+
+          ssh -o BatchMode=yes tebi bash -s -- "$bundle_ext" "$total_chunks" "$expected_sha" <<'REMOTE'
+          set -euo pipefail
+          export PATH="/opt/mamba/bin:$PATH"
+          bundle_ext="$1"
+          total_chunks="$2"
+          expected_sha="$3"
+          bundle_path="/tmp/apihub-release/release.${bundle_ext}"
+          for idx in $(seq -f '%04g' 0 "$((total_chunks - 1))"); do
+            cat "/tmp/apihub-release/chunks/chunk_${idx}"
+          done > "$bundle_path"
+          got_sha="$(sha256sum "$bundle_path" | awk '{print $1}')"
+          if [ "$got_sha" != "$expected_sha" ]; then
+            echo "reassembled sha256 mismatch: want ${expected_sha}, got ${got_sha}" >&2
+            exit 1
+          fi
+          if [ "$bundle_ext" = "tar.zst" ]; then
+            zstd -dc "$bundle_path" | tar -xf - -C /tmp/apihub-release
+          else
+            tar -xzf "$bundle_path" -C /tmp/apihub-release
+          fi
+          rm -rf /tmp/apihub-release/chunks "$bundle_path"
+          chmod +x /tmp/apihub-release/apihub /tmp/apihub-release/deploy.sh /tmp/apihub-release/slot-watchdog.sh
+          REMOTE
 
       - name: Deploy
         env:
