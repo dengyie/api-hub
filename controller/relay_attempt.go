@@ -131,7 +131,6 @@ func executeRelayAttempt(
 	service.AppendUsedChannel(c, channel.Id)
 
 	if billingErr := service.PrepareTieredBillingForSelectedGroup(c, relayInfo); billingErr != nil {
-		lbAttempt.EndCancelled()
 		return relayAttemptOutcome{Success: false, WillRetry: false, Err: billingErr}
 	}
 
@@ -143,7 +142,6 @@ func executeRelayAttempt(
 		} else {
 			err = types.NewErrorWithStatusCode(bodyErr, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 		}
-		lbAttempt.EndCancelled()
 		return relayAttemptOutcome{Success: false, WillRetry: false, Err: err}
 	}
 	c.Request.Body = io.NopCloser(bodyStorage)

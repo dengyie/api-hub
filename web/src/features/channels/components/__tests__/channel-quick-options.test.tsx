@@ -316,11 +316,7 @@ const DISGUISE_SWITCH = { name: 'Client Disguise' }
 
 describe('client disguise quick option', () => {
   test('is unchecked by default with no trailing select in stacked layout', () => {
-    render(
-      <QuickOptionsHarness
-        confirm={() => Promise.resolve(true)}
-      />
-    )
+    render(<QuickOptionsHarness confirm={() => Promise.resolve(true)} />)
     const toggle = screen.getByRole('switch', DISGUISE_SWITCH)
     expect(toggle).not.toBeChecked()
     expect(screen.queryByRole('combobox')).not.toBeInTheDocument()
@@ -396,11 +392,21 @@ describe('client disguise quick option', () => {
     await user.click(
       await screen.findByRole('option', { name: 'Off (bare client)' })
     )
-    expect(screen.getByRole('switch', DISGUISE_SWITCH)).not.toBeChecked()
+    expect(screen.getByRole('switch', DISGUISE_SWITCH)).toBeChecked()
     expect(screen.getByRole('combobox')).toHaveTextContent('Off (bare client)')
 
     await user.click(screen.getByRole('button', { name: 'Save' }))
     await waitFor(() => expect(saved).toHaveLength(2))
     expect(saved[1].client_fingerprint).toBe('off')
+
+    // Toggling the switch off resets mode to auto and hides the select
+    const toggle = screen.getByRole('switch', DISGUISE_SWITCH)
+    await user.click(toggle)
+    expect(toggle).not.toBeChecked()
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(saved).toHaveLength(3))
+    expect(saved[2].client_fingerprint).toBe('auto')
   })
 })

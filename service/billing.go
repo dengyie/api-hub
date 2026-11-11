@@ -3,8 +3,11 @@ package service
 import (
 	"fmt"
 	"net/http"
+	"strings"
 
+	"github.com/dengyie/apihub/common"
 	"github.com/dengyie/apihub/logger"
+	"github.com/dengyie/apihub/model"
 	relaycommon "github.com/dengyie/apihub/relay/common"
 	"github.com/dengyie/apihub/relaykit/types"
 	"github.com/gin-gonic/gin"
@@ -49,11 +52,56 @@ func PreConsumeBilling(c *gin.Context, preConsumedQuota int, relayInfo *relaycom
 // SettleBilling 执行计费结算。如果 RelayInfo 上有 BillingSession 则通过 session 结算，
 // 否则回退到旧的 PostConsumeQuota 路径（兼容按次计费等场景）。
 func SettleBilling(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, actualQuota int) error {
+	if relayInfo == nil {
+		return nil
+	}
+
+	retroactive := false
+	if relayInfo.Billing == nil && actualQuota > 0 {
+		if strings.TrimSpace(relayInfo.RequestId) == "" {
+			if ctx != nil {
+				relayInfo.RequestId = ctx.GetString(common.RequestIdKey)
+			}
+			if strings.TrimSpace(relayInfo.RequestId) == "" {
+				relayInfo.RequestId = common.GetUUID()
+			}
+		}
+		session, apiErr := newBillingSession(ctx, relayInfo, actualQuota, true)
+		if apiErr == nil {
+			relayInfo.Billing = session
+			retroactive = true
+		} else {
+			pref := common.NormalizeBillingPreference(relayInfo.UserSetting.BillingPreference)
+			if pref == "subscription_only" {
+				return apiErr
+			}
+			if pref == "subscription_first" || pref == "" {
+				hasSub, subErr := model.HasActiveUserSubscription(relayInfo.UserId)
+				if subErr != nil {
+					return subErr
+				}
+				if hasSub {
+					allowOverflow, overflowErr := model.UserActiveSubscriptionsAllowWalletOverflow(relayInfo.UserId)
+					if overflowErr != nil {
+						return overflowErr
+					}
+					if !allowOverflow {
+						return apiErr
+					}
+				}
+			}
+		}
+	}
+
 	if relayInfo.Billing != nil {
 		preConsumed := relayInfo.Billing.GetPreConsumedQuota()
 		delta := actualQuota - preConsumed
 
-		if delta > 0 {
+		if retroactive {
+			logger.LogInfo(ctx, fmt.Sprintf("后结算扣费：%s",
+				logger.FormatQuota(actualQuota),
+			))
+		} else if delta > 0 {
 			logger.LogInfo(ctx, fmt.Sprintf("预扣费后补扣费：%s（实际消耗：%s，预扣费：%s）",
 				logger.FormatQuota(delta),
 				logger.FormatQuota(actualQuota),

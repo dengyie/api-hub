@@ -1,10 +1,13 @@
 package service
 
 import (
+	"errors"
 	"math"
 	"math/rand"
+	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/dengyie/apihub/common"
 	"github.com/dengyie/apihub/model"
@@ -1239,4 +1242,291 @@ func TestSamePriceCacheReadsRemainInInput(t *testing.T) {
 			assert.Equal(t, separateParams.Len, params.Len, "tier conditions keep the full context length")
 		})
 	}
+}
+
+func TestPrepareTieredBillingForSelectedGroupReservePreserves403(t *testing.T) {
+	relayInfo := &relaycommon.RelayInfo{
+		TieredBillingSnapshot: &billingexpr.BillingSnapshot{
+			BillingMode:               "tiered_expr",
+			ExprString:                `tier("base", p)`,
+			ExprHash:                  billingexpr.ExprHashString(`tier("base", p)`),
+			GroupRatio:                0.10,
+			EstimatedQuotaBeforeGroup: 500_000,
+			EstimatedQuotaAfterGroup:  50_000,
+			QuotaPerUnit:              testQuotaPerUnit,
+		},
+		PriceData: types.PriceData{
+			GroupRatioInfo: types.GroupRatioInfo{GroupRatio: 0.20},
+		},
+	}
+	expectedErr := relaykittypes.NewErrorWithStatusCode(
+		errors.New("subscription quota insufficient"),
+		relaykittypes.ErrorCodeInsufficientUserQuota,
+		http.StatusForbidden,
+		relaykittypes.ErrOptionWithSkipRetry(),
+	)
+	mockSession := &errReserveBillingSettler{err: expectedErr}
+	relayInfo.Billing = mockSession
+
+	apiErr := PrepareTieredBillingForSelectedGroup(nil, relayInfo)
+	require.NotNil(t, apiErr)
+	assert.Equal(t, http.StatusForbidden, apiErr.StatusCode)
+	assert.Equal(t, relaykittypes.ErrorCodeInsufficientUserQuota, apiErr.GetErrorCode())
+}
+
+type errReserveBillingSettler struct {
+	recordingBillingSettler
+	err error
+}
+
+func (s *errReserveBillingSettler) Reserve(targetQuota int) error {
+	return s.err
+}
+
+func TestSettleBillingRetroactiveSessionDeductsSubscriptionForFreeModel(t *testing.T) {
+	truncate(t)
+	const userID = 708
+	const planID = 5081
+	seedUser(t, userID, 0) // zero wallet balance
+	require.NoError(t, model.DB.Create(&model.SubscriptionPlan{
+		Id:          planID,
+		Title:       "Test Pro Plan",
+		TotalAmount: 100_000,
+		Enabled:     true,
+	}).Error)
+	require.NoError(t, model.DB.Create(&model.UserSubscription{
+		Id:          9081,
+		UserId:      userID,
+		PlanId:      planID,
+		AmountTotal: 100_000,
+		AmountUsed:  0,
+		Status:      "active",
+		StartTime:   time.Now().Unix() - 60,
+		EndTime:     time.Now().Unix() + 3600,
+	}).Error)
+
+	relayInfo := &relaycommon.RelayInfo{
+		UserId:          userID,
+		IsPlayground:    true,
+		OriginModelName: "gpt-4o-mini",
+		RequestId:       "test-req-sub-retro",
+		UserSetting: dto.UserSetting{
+			BillingPreference: "subscription_only",
+		},
+		FinalPreConsumedQuota: 0,
+	}
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	// Pre-consume was skipped (Billing is nil), but tool calls / actual generation cost 5,000 quota
+	require.NoError(t, SettleBilling(ctx, relayInfo, 5_000))
+
+	// BillingSession was retroactively established with subscription source
+	require.NotNil(t, relayInfo.Billing)
+	assert.Equal(t, BillingSourceSubscription, relayInfo.BillingSource)
+	assert.Equal(t, 9081, relayInfo.SubscriptionId)
+
+	// Wallet quota remains 0 and was NOT deducted into debt
+	walletQuota, err := model.GetUserQuota(userID, false)
+	require.NoError(t, err)
+	assert.Equal(t, 0, walletQuota)
+
+	// Subscription used quota is 5,000
+	var sub model.UserSubscription
+	require.NoError(t, model.DB.Where("id = ?", 9081).First(&sub).Error)
+	assert.Equal(t, int64(5_000), sub.AmountUsed)
+}
+
+func TestSettleBillingRetroactiveEdgeCases(t *testing.T) {
+	t.Run("wallet_first falls back to subscription instead of overdrawing low wallet", func(t *testing.T) {
+		truncate(t)
+		const userID = 711
+		const planID = 5082
+		seedUser(t, userID, 100)
+		seedToken(t, 811, userID, "tok-retro-wf", 50_000)
+		require.NoError(t, model.DB.Create(&model.SubscriptionPlan{
+			Id: planID, Title: "Pro", TotalAmount: 100_000, Enabled: true,
+		}).Error)
+		require.NoError(t, model.DB.Create(&model.UserSubscription{
+			Id: 9082, UserId: userID, PlanId: planID, AmountTotal: 100_000, AmountUsed: 0,
+			Status: "active", StartTime: time.Now().Unix() - 60, EndTime: time.Now().Unix() + 3600,
+			AllowWalletOverflow: true,
+		}).Error)
+
+		relayInfo := &relaycommon.RelayInfo{
+			UserId: userID, TokenId: 811, TokenKey: "tok-retro-wf",
+			OriginModelName: "gpt-4o-mini", RequestId: "req-retro-wf",
+			UserSetting: dto.UserSetting{BillingPreference: "wallet_first"},
+		}
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		require.NoError(t, SettleBilling(ctx, relayInfo, 5_000))
+
+		assert.Equal(t, BillingSourceSubscription, relayInfo.BillingSource)
+		walletQuota, err := model.GetUserQuota(userID, false)
+		require.NoError(t, err)
+		assert.Equal(t, 100, walletQuota)
+		var sub model.UserSubscription
+		require.NoError(t, model.DB.Where("id = ?", 9082).First(&sub).Error)
+		assert.Equal(t, int64(5_000), sub.AmountUsed)
+		var tok model.Token
+		require.NoError(t, model.DB.Where("id = ?", 811).First(&tok).Error)
+		assert.Equal(t, 45_000, tok.RemainQuota)
+	})
+
+	t.Run("subscription_first overflows cleanly to wallet when enabled", func(t *testing.T) {
+		truncate(t)
+		const userID = 712
+		const planID = 5083
+		seedUser(t, userID, 10_000)
+		seedToken(t, 812, userID, "tok-retro-sf-ok", 50_000)
+		require.NoError(t, model.DB.Create(&model.SubscriptionPlan{
+			Id: planID, Title: "Pro", TotalAmount: 10_000, Enabled: true,
+		}).Error)
+		require.NoError(t, model.DB.Create(&model.UserSubscription{
+			Id: 9083, UserId: userID, PlanId: planID, AmountTotal: 10_000, AmountUsed: 9_000,
+			Status: "active", StartTime: time.Now().Unix() - 60, EndTime: time.Now().Unix() + 3600,
+			AllowWalletOverflow: true,
+		}).Error)
+
+		relayInfo := &relaycommon.RelayInfo{
+			UserId: userID, TokenId: 812, TokenKey: "tok-retro-sf-ok",
+			OriginModelName: "gpt-4o-mini", RequestId: "req-retro-sf-ok",
+			UserSetting: dto.UserSetting{BillingPreference: "subscription_first"},
+		}
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		require.NoError(t, SettleBilling(ctx, relayInfo, 5_000))
+
+		assert.Equal(t, BillingSourceWallet, relayInfo.BillingSource)
+		walletQuota, err := model.GetUserQuota(userID, false)
+		require.NoError(t, err)
+		assert.Equal(t, 5_000, walletQuota)
+		var sub model.UserSubscription
+		require.NoError(t, model.DB.Where("id = ?", 9083).First(&sub).Error)
+		assert.Equal(t, int64(9_000), sub.AmountUsed)
+		var tok model.Token
+		require.NoError(t, model.DB.Where("id = ?", 812).First(&tok).Error)
+		assert.Equal(t, 45_000, tok.RemainQuota)
+	})
+
+	t.Run("subscription_first without overflow and subscription_only never touch wallet", func(t *testing.T) {
+		for _, pref := range []string{"subscription_only", "subscription_first"} {
+			t.Run(pref, func(t *testing.T) {
+				truncate(t)
+				const userID = 713
+				const planID = 5084
+				seedUser(t, userID, 50_000)
+				seedToken(t, 813, userID, "tok-retro-strict", 50_000)
+				require.NoError(t, model.DB.Create(&model.SubscriptionPlan{
+					Id: planID, Title: "Strict", TotalAmount: 10_000, Enabled: true,
+				}).Error)
+				require.NoError(t, model.DB.Create(&model.UserSubscription{
+					Id: 9084, UserId: userID, PlanId: planID, AmountTotal: 10_000, AmountUsed: 9_000,
+					Status: "active", StartTime: time.Now().Unix() - 60, EndTime: time.Now().Unix() + 3600,
+					AllowWalletOverflow: false,
+				}).Error)
+
+				relayInfo := &relaycommon.RelayInfo{
+					UserId: userID, TokenId: 813, TokenKey: "tok-retro-strict",
+					OriginModelName: "gpt-4o-mini", RequestId: "req-retro-strict-" + pref,
+					UserSetting: dto.UserSetting{BillingPreference: pref},
+				}
+				ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+				err := SettleBilling(ctx, relayInfo, 5_000)
+				require.Error(t, err)
+
+				walletQuota, qErr := model.GetUserQuota(userID, false)
+				require.NoError(t, qErr)
+				assert.Equal(t, 50_000, walletQuota)
+				var sub model.UserSubscription
+				require.NoError(t, model.DB.Where("id = ?", 9084).First(&sub).Error)
+				assert.Equal(t, int64(9_000), sub.AmountUsed)
+				var tok model.Token
+				require.NoError(t, model.DB.Where("id = ?", 813).First(&tok).Error)
+				assert.Equal(t, 50_000, tok.RemainQuota)
+			})
+		}
+	})
+
+	t.Run("subscription_only still charges subscription and token when token remain is below actualQuota", func(t *testing.T) {
+		truncate(t)
+		const userID = 714
+		const planID = 5085
+		seedUser(t, userID, 50_000)
+		seedToken(t, 814, userID, "tok-retro-lowtok", 2_000)
+		require.NoError(t, model.DB.Create(&model.SubscriptionPlan{
+			Id: planID, Title: "Pro", TotalAmount: 100_000, Enabled: true,
+		}).Error)
+		require.NoError(t, model.DB.Create(&model.UserSubscription{
+			Id: 9085, UserId: userID, PlanId: planID, AmountTotal: 100_000, AmountUsed: 0,
+			Status: "active", StartTime: time.Now().Unix() - 60, EndTime: time.Now().Unix() + 3600,
+		}).Error)
+
+		relayInfo := &relaycommon.RelayInfo{
+			UserId: userID, TokenId: 814, TokenKey: "tok-retro-lowtok",
+			OriginModelName: "gpt-4o-mini", RequestId: "req-retro-lowtok",
+			UserSetting: dto.UserSetting{BillingPreference: "subscription_only"},
+		}
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		require.NoError(t, SettleBilling(ctx, relayInfo, 5_000))
+		// Repeated settlement must be a no-op
+		require.NoError(t, SettleBilling(ctx, relayInfo, 5_000))
+
+		assert.Equal(t, BillingSourceSubscription, relayInfo.BillingSource)
+		walletQuota, err := model.GetUserQuota(userID, false)
+		require.NoError(t, err)
+		assert.Equal(t, 50_000, walletQuota)
+		var sub model.UserSubscription
+		require.NoError(t, model.DB.Where("id = ?", 9085).First(&sub).Error)
+		assert.Equal(t, int64(5_000), sub.AmountUsed)
+		var tok model.Token
+		require.NoError(t, model.DB.Where("id = ?", 814).First(&tok).Error)
+		assert.Equal(t, -3_000, tok.RemainQuota)
+	})
+}
+
+func TestPrepareImageBillingForRequestFreeModelExemption(t *testing.T) {
+	t.Run("exempts zero quota when EnableFreeModelPreConsume is false", func(t *testing.T) {
+		truncate(t)
+		operation_setting.GetQuotaSetting().EnableFreeModelPreConsume = false
+
+		relayInfo := &relaycommon.RelayInfo{
+			UserId:                709,
+			IsPlayground:          true,
+			OriginModelName:       "dall-e-free",
+			ImageQuotaBeforeGroup: 0,
+			PriceData: types.PriceData{
+				FreeModel:      false,
+				GroupRatioInfo: types.GroupRatioInfo{GroupRatio: 1.0},
+			},
+		}
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		err := PrepareImageBillingForRequest(ctx, relayInfo, 1)
+		require.Nil(t, err)
+		assert.True(t, relayInfo.PriceData.FreeModel)
+		assert.Nil(t, relayInfo.Billing)
+	})
+
+	t.Run("enforces pre-consume when EnableFreeModelPreConsume is true", func(t *testing.T) {
+		truncate(t)
+		const zeroUserID = 710
+		seedUser(t, zeroUserID, 0)
+		operation_setting.GetQuotaSetting().EnableFreeModelPreConsume = true
+
+		relayInfo := &relaycommon.RelayInfo{
+			UserId:                zeroUserID,
+			IsPlayground:          true,
+			OriginModelName:       "dall-e-free",
+			ImageQuotaBeforeGroup: 0,
+			UserSetting: dto.UserSetting{
+				BillingPreference: "wallet_only",
+			},
+			PriceData: types.PriceData{
+				FreeModel:      false,
+				GroupRatioInfo: types.GroupRatioInfo{GroupRatio: 1.0},
+			},
+		}
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		err := PrepareImageBillingForRequest(ctx, relayInfo, 1)
+		require.NotNil(t, err)
+		assert.Equal(t, relaykittypes.ErrorCodeInsufficientUserQuota, err.GetErrorCode())
+	})
 }

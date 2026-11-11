@@ -420,6 +420,9 @@ func writeRetrieveModelNotFound(c *gin.Context, modelType int, modelId string) {
 
 func RetrieveModel(c *gin.Context, modelType int) {
 	modelId := c.Param("model")
+	if modelType == constant.ChannelTypeGemini {
+		modelId = strings.TrimPrefix(modelId, "models/")
+	}
 	visCtx, err := resolveVisibleModelContext(c)
 	if err != nil {
 		writeRetrieveModelError(

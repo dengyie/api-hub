@@ -659,6 +659,16 @@ func TestRetrieveModelMatchesListModelsVisibilityAndEnrichment(t *testing.T) {
 	assert.Equal(t, "zz-custom-retrieve-model", retrievedGemini.Name)
 	assert.Equal(t, "zz-custom-retrieve-model", retrievedGemini.DisplayName)
 
+	// Gemini format with models/ prefix in path param
+	geminiPrefixedRec := runRetrieveModelRequest("models/zz-custom-retrieve-model", constant.ChannelTypeGemini, func(c *gin.Context) {
+		c.Set("id", 1101)
+	})
+	require.Equal(t, http.StatusOK, geminiPrefixedRec.Code)
+	var retrievedPrefixedGemini dto.GeminiModel
+	require.NoError(t, common.Unmarshal(geminiPrefixedRec.Body.Bytes(), &retrievedPrefixedGemini))
+	assert.Equal(t, "zz-custom-retrieve-model", retrievedPrefixedGemini.Name)
+	assert.Equal(t, "zz-custom-retrieve-model", retrievedPrefixedGemini.DisplayName)
+
 	// Hidden catalog model, other-group static model (gpt-4o-mini only in vip), and unknown model -> 404.
 	for _, hiddenOrMissing := range []string{"zz-hidden-retrieve-model", "gpt-4o-mini", "zz-nonexistent-model"} {
 		rec := runRetrieveModelRequest(hiddenOrMissing, constant.ChannelTypeOpenAI, func(c *gin.Context) {

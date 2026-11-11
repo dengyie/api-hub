@@ -10,6 +10,7 @@ import (
 	relaycommon "github.com/dengyie/apihub/relay/common"
 	"github.com/dengyie/apihub/relaykit/dto"
 	"github.com/dengyie/apihub/relaykit/types"
+	"github.com/dengyie/apihub/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 )
 
@@ -71,7 +72,8 @@ func PrepareImageBillingForRequest(c *gin.Context, info *relaycommon.RelayInfo, 
 		return types.NewErrorWithStatusCode(err, types.ErrorCodeModelPriceError, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 	}
 	info.PriceData.QuotaToPreConsume = quota
-	if quota == 0 && info.Billing == nil {
+	if quota == 0 && info.Billing == nil && !operation_setting.GetQuotaSetting().EnableFreeModelPreConsume {
+		info.PriceData.FreeModel = true
 		return nil
 	}
 	info.PriceData.FreeModel = false

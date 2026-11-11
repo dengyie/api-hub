@@ -201,6 +201,14 @@ func TestRetrieveModelSupportsOpenAIAnthropicAndGeminiRoutes(t *testing.T) {
 			absentKeys:     []string{"error"},
 		},
 		{
+			name:           "v1beta models Gemini retrieve with models prefix",
+			path:           "/v1beta/models/models/gemini-2.5-flash",
+			headers:        map[string]string{"x-goog-api-key": "retrievetestkey"},
+			expectedStatus: http.StatusOK,
+			expectedKeys:   []string{"name", "displayName"},
+			absentKeys:     []string{"error"},
+		},
+		{
 			name:           "v1beta models Gemini missing model returns 404",
 			path:           "/v1beta/models/missing-model?key=retrievetestkey",
 			expectedStatus: http.StatusNotFound,

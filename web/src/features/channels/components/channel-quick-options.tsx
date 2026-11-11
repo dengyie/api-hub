@@ -78,18 +78,24 @@ export function ChannelQuickOptions(props: ChannelQuickOptionsProps) {
   const id = useId()
   const formContext = useFormContext<ChannelFormValues>()
   const form = props.form ?? formContext
-  const [passthrough, headerOverride, autoBan, modelCheck, websocket, clientFingerprint] =
-    useWatch({
-      control: form.control,
-      name: [
-        'pass_through_body_enabled',
-        'header_override',
-        'auto_ban',
-        'upstream_model_update_check_enabled',
-        'responses_websocket_enabled',
-        'client_fingerprint',
-      ],
-    })
+  const [
+    passthrough,
+    headerOverride,
+    autoBan,
+    modelCheck,
+    websocket,
+    clientFingerprint,
+  ] = useWatch({
+    control: form.control,
+    name: [
+      'pass_through_body_enabled',
+      'header_override',
+      'auto_ban',
+      'upstream_model_update_check_enabled',
+      'responses_websocket_enabled',
+      'client_fingerprint',
+    ],
+  })
   const sensitiveDisabled = props.sensitiveLocked || props.disabled
   const setOption = (
     name:
@@ -181,7 +187,7 @@ export function ChannelQuickOptions(props: ChannelQuickOptionsProps) {
     description: t(
       'Present upstream requests as Codex CLI or Claude Code; useful when the upstream gates every model by client fingerprint'
     ),
-    checked: fingerprintMode === 'codex' || fingerprintMode === 'claude',
+    checked: fingerprintMode !== 'auto',
     onCheckedChange: (value) =>
       form.setValue('client_fingerprint', value ? 'codex' : 'auto', {
         shouldDirty: true,
