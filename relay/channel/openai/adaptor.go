@@ -15,6 +15,7 @@ import (
 
 	"github.com/dengyie/apihub/common"
 	"github.com/dengyie/apihub/constant"
+	"github.com/dengyie/apihub/loadbalancer"
 	"github.com/dengyie/apihub/logger"
 	"github.com/dengyie/apihub/relay/channel"
 	"github.com/dengyie/apihub/relay/channel/ai360"
@@ -673,6 +674,39 @@ func detectImageMimeType(filename string) string {
 	}
 }
 
+// clampResponsesMaxOutputTokens 把 Responses 请求的 max_output_tokens 钳到
+// 该渠道该上游模型已知的上限。
+//
+// 与 chat 侧的 SanitizeModelCapabilitiesAndLimits 同源（都读
+// loadbalancer.ClampMaxCompletionTokens），但 Responses 请求从不经过那个函数：
+// ConvertOpenAIResponsesRequest 有两条 return 路径（推理后缀快速通道与完整
+// 转换通道），两条都必须钳，否则一旦学习到上限，只有 chat 请求受益，
+// Responses 请求仍旧每个都先吃一次 400 再重试。
+//
+// 不复用调用方的 *uint：MaxOutputTokens 是共享指针，原地改写会污染上层请求
+// 对象，让同一次请求链路上的后续尝试都带着被改小的值（而调用方可能还要用
+// 原值做计费/日志）。这里新建一份值再挂回去。
+func clampResponsesMaxOutputTokens(request dto.OpenAIResponsesRequest, info *relaycommon.RelayInfo) dto.OpenAIResponsesRequest {
+	if info == nil || request.MaxOutputTokens == nil {
+		return request
+	}
+	requested := *request.MaxOutputTokens
+	if requested == 0 {
+		return request
+	}
+	modelName := info.UpstreamModelName
+	if modelName == "" {
+		modelName = info.OriginModelName
+	}
+	clamped := loadbalancer.ClampMaxCompletionTokens(info.ChannelId, modelName, requested)
+	if clamped == requested {
+		return request
+	}
+	v := clamped
+	request.MaxOutputTokens = &v
+	return request
+}
+
 func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.OpenAIResponsesRequest) (any, error) {
 	//  转换模型推理力度后缀
 	effort, originModel := reasoning.ParseOpenAIReasoningEffortFromModelSuffix(request.Model)
@@ -693,7 +727,7 @@ func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommo
 			}
 			info.SetReasoningEffort(rawEffort)
 		}
-		return request, nil
+		return clampResponsesMaxOutputTokens(request, info), nil
 	}
 	currentIntent, diagnostics, err := kitreasoning.FromOpenAIResponses(&request)
 	if err != nil {
@@ -741,7 +775,7 @@ func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommo
 			info.SetReasoningEffort(string(canonicalEffort))
 		}
 	}
-	return request, nil
+	return clampResponsesMaxOutputTokens(request, info), nil
 }
 
 func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (any, error) {

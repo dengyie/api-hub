@@ -100,6 +100,37 @@ func corroborationBucketModel(class, modelName string) string {
 	return ""
 }
 
+// corroborationWindow 返回佐证计数的有效窗口。
+//
+// 必须由 Record / Peek / Count **三方共用同一份实现**：三处各自算窗口时，
+// 任何一处漏掉过期判定都会让「窗口语义」在读写两侧分叉。
+func corroborationWindow() time.Duration {
+	window := time.Duration(GetPolicy().Default.Breaker.AutoDisableCorroborationWindowSecondsOrDefault()) * time.Second
+	if window <= 0 {
+		return 10 * time.Minute
+	}
+	return window
+}
+
+// corroborationCountLocked 读取某键在窗口内的有效计数。调用方必须已持有
+// corroborationRegistry.mu，窗口由调用方在取锁**之前**算好传进来 ——
+// GetPolicy 内部有自己的锁，在持有注册表锁的情况下再去拿策略锁是没必要的
+// 锁序耦合。
+//
+// **过期的条目按 0 计**，与 RecordAutoDisableSignal 的建键逻辑严格同源：
+// 那里在 `now.Sub(st.windowStart) > window` 时重建状态，这里必须给出同样的
+// 结论，否则读侧看到的是上一窗口的陈旧计数。
+func corroborationCountLocked(key string, now time.Time, window time.Duration) int {
+	st := corroborationRegistry.m[key]
+	if st == nil {
+		return 0
+	}
+	if now.Sub(st.windowStart) > window {
+		return 0
+	}
+	return st.count
+}
+
 // RecordAutoDisableSignal 记录一次「命中了自动禁用判据」的信号，
 // 返回是否已达阈值（调用方才可以执行不可逆的禁用）与当前累计次数。
 //
@@ -118,10 +149,7 @@ func RecordAutoDisableSignal(channelID int, modelName, class string) (ready bool
 	if threshold <= 1 {
 		return true, 1
 	}
-	window := time.Duration(policy.Default.Breaker.AutoDisableCorroborationWindowSecondsOrDefault()) * time.Second
-	if window <= 0 {
-		window = 10 * time.Minute
-	}
+	window := corroborationWindow()
 
 	key := corroborationKey(channelID, corroborationBucketModel(class, modelName), class)
 	now := time.Now()
@@ -247,14 +275,20 @@ func ResetCorroborationForChannel(channelID int) {
 	}
 }
 
-// CorroborationCount 返回当前累计次数，仅供日志与测试观察。
-// 与 Record/Peek 走同一份分桶归一，保证三方读到同一个桶。
+// CorroborationCount 返回当前窗口内的累计次数，仅供日志与测试观察。
+// 与 Record/Peek 走同一份分桶归一与**同一份窗口过期判定**，保证三方读到
+// 同一个桶、同一个窗口。
+//
+// 曾经这里不判窗口过期：Record 到点会重建状态，Peek/Count 却继续读着
+// 上一窗口的 count。生产实测的直接后果是「佐证永远凑不齐」——渠道 #377
+// 的 cooldown_seconds 是 300、递增到 900s，而佐证窗口只有 600s：第二次之后
+// 每次熔断都跨过一个完整窗口，Record 重建、Count 却仍报旧值，日志稳定打出
+// 「1/3」，禁用闸门永远打不开，熔断升级到 #17/#18/#19 仍然 1/3。
 func CorroborationCount(channelID int, modelName, class string) int {
 	key := corroborationKey(channelID, corroborationBucketModel(class, modelName), class)
+	window := corroborationWindow()
+	now := time.Now()
 	corroborationRegistry.mu.Lock()
 	defer corroborationRegistry.mu.Unlock()
-	if st := corroborationRegistry.m[key]; st != nil {
-		return st.count
-	}
-	return 0
+	return corroborationCountLocked(key, now, window)
 }

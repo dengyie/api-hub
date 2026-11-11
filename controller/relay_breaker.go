@@ -126,6 +126,11 @@ func applyUpstreamFailureEffects(c *gin.Context, channel *model.Channel, relayIn
 	case service.BreakerModelUnavailable:
 		tripped := tripModelScope(newAPIError, time.Time{})
 		logger.LogWarn(c, fmt.Sprintf("渠道 #%d [%s] 上游模型不可用/已禁用，已立即熔断: %s", channel.Id, scopeLabel(tripped), newAPIError.Error()))
+	case service.BreakerResponsesAPINotSupported:
+		// Responses API 不被该上游支持：模型在、协议不在。按 (渠道, 模型) 冷却，
+		// 其余模型照常；既非「模型不存在」（不得进自动禁用），也非渠道故障。
+		tripped := tripModelScope(newAPIError, time.Time{})
+		logger.LogWarn(c, fmt.Sprintf("渠道 #%d [%s] 上游不支持 Responses API (api_not_supported)，已按模型冷却: %s", channel.Id, scopeLabel(tripped), newAPIError.Error()))
 	case service.BreakerPermission:
 		tripped := tripModelScope(newAPIError, time.Time{})
 		logger.LogWarn(c, fmt.Sprintf("渠道 #%d [%s] 上游权限受限/分组无权访问/模型不支持，已立即熔断: %s", channel.Id, scopeLabel(tripped), newAPIError.Error()))

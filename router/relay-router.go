@@ -34,7 +34,13 @@ func SetRelayRouter(router *gin.Engine) {
 			}
 		})
 
-		modelsRouter.GET("/:model", func(c *gin.Context) {
+		// 用 catch-all 而非 `:model`：模型 ID 本身允许包含 `/`（如
+		// `openrouter/free`、`meta-llama/Llama-3-70B`），`:model` 只匹配单个
+		// 路径段，带斜杠的模型在 `/v1/models/<带斜杠的模型>` 上会先被路由
+		// 拒成 404，客户端根本拿不到「模型不存在」这个真实结论。
+		// catch-all 会把前导 `/` 一并捕获进参数，取值侧必须剥掉（见
+		// controller.RetrieveModel）。
+		modelsRouter.GET("/*model", func(c *gin.Context) {
 			switch {
 			case c.GetHeader("x-api-key") != "" && c.GetHeader("anthropic-version") != "":
 				controller.RetrieveModel(c, constant.ChannelTypeAnthropic)
@@ -53,10 +59,10 @@ func SetRelayRouter(router *gin.Engine) {
 		geminiRouter.GET("", func(c *gin.Context) {
 			controller.ListModels(c, constant.ChannelTypeGemini)
 		})
-		geminiRouter.GET("/:model", func(c *gin.Context) {
-			controller.RetrieveModel(c, constant.ChannelTypeGemini)
-		})
-		geminiRouter.GET("/models/:model", func(c *gin.Context) {
+		// 同上：catch-all 覆盖 `/v1beta/models/{model}` 与
+		// `/v1beta/models/models/{model}` 两种 Gemini 官方写法，
+		// 后者由 RetrieveModel 的 "models/" 前缀剥离处理。
+		geminiRouter.GET("/*model", func(c *gin.Context) {
 			controller.RetrieveModel(c, constant.ChannelTypeGemini)
 		})
 	}
@@ -68,7 +74,7 @@ func SetRelayRouter(router *gin.Engine) {
 		geminiCompatibleRouter.GET("", func(c *gin.Context) {
 			controller.ListModels(c, constant.ChannelTypeOpenAI)
 		})
-		geminiCompatibleRouter.GET("/:model", func(c *gin.Context) {
+		geminiCompatibleRouter.GET("/*model", func(c *gin.Context) {
 			controller.RetrieveModel(c, constant.ChannelTypeOpenAI)
 		})
 	}

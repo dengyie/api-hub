@@ -245,6 +245,27 @@ func classifyAutoDisable(channelId int, err *types.NewAPIError) autoDisableVerdi
 	if loadbalancer.IsReasoningHydrationError(err) {
 		return autoDisableVerdict{}
 	}
+	// Responses API 不被该上游支持：模型在、协议不在，换渠道/按模型冷却即可
+	// 自愈。绝不能落入下方 IsUpstreamModelUnavailableError 那条「模型不存在」
+	// 的不可逆禁用判据 —— 渠道 #368 生产实测：每个 Responses 请求都被当作
+	// 确定性失效收集佐证，而这条渠道的 chat/completions 完全正常。
+	if loadbalancer.IsResponsesAPINotSupportedError(err) {
+		return autoDisableVerdict{}
+	}
+	// 限流/并发超限是瞬时的（几秒内自愈，如 #377 的「当前并发已满」）。
+	// 自动禁用不可逆，瞬时限流交给熔断器的短避让就够；显式排除，不依赖
+	// 状态码白名单恰好漏掉它。
+	if loadbalancer.IsUpstreamRateLimitError(err) {
+		return autoDisableVerdict{}
+	}
+	// 周期性/按日/按周等**会自动重置**的额度耗尽：不做任何动作，到点它自己
+	// 就好。把这种渠道永久摘掉等于每天都要人工救一次。而凭据欠费
+	// （IsUpstreamQuotaError）不会自愈，仍走下方 status_code / 关键词判据。
+	// 生产实测：#394 免费模型池日额度耗尽（"resets at 00:00"）被旧判据持续
+	// 收集佐证 —— 那条渠道从没「缺钱」，只是当天额度用完了。
+	if loadbalancer.IsSelfHealingQuotaError(err) {
+		return autoDisableVerdict{}
+	}
 	// 确定性失效优先于一切：模型映射失效与 OAuth 凭据刷新失效都不会自愈，
 	// 留在池子里等于每次请求都白烧一轮换渠道重试。自动禁用状态码默认只有 401，
 	// 覆盖不到 404「模型不存在」这类返回码。

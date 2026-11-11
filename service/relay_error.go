@@ -26,17 +26,18 @@ import (
 type BreakerEffectType string
 
 const (
-	BreakerNone             BreakerEffectType = "none"
-	BreakerRateLimit        BreakerEffectType = "rate_limit"
-	BreakerCurfew           BreakerEffectType = "curfew"
-	BreakerEOL              BreakerEffectType = "eol"
-	BreakerStreamBroken     BreakerEffectType = "stream_broken"
-	BreakerQuota            BreakerEffectType = "quota"
-	BreakerRouting          BreakerEffectType = "routing"
-	BreakerThinkingHistory  BreakerEffectType = "thinking_history"
-	BreakerModelUnavailable BreakerEffectType = "model_unavailable"
-	BreakerPermission       BreakerEffectType = "permission"
-	BreakerRelay            BreakerEffectType = "relay"
+	BreakerNone                     BreakerEffectType = "none"
+	BreakerRateLimit                BreakerEffectType = "rate_limit"
+	BreakerCurfew                   BreakerEffectType = "curfew"
+	BreakerEOL                      BreakerEffectType = "eol"
+	BreakerStreamBroken             BreakerEffectType = "stream_broken"
+	BreakerQuota                    BreakerEffectType = "quota"
+	BreakerRouting                  BreakerEffectType = "routing"
+	BreakerThinkingHistory          BreakerEffectType = "thinking_history"
+	BreakerModelUnavailable         BreakerEffectType = "model_unavailable"
+	BreakerResponsesAPINotSupported BreakerEffectType = "responses_api_not_supported"
+	BreakerPermission               BreakerEffectType = "permission"
+	BreakerRelay                    BreakerEffectType = "relay"
 )
 
 // FailureDecision 是网关层对单次上游失败的完整结构化评定结果：
@@ -60,6 +61,12 @@ func ClassifyBreakerEffect(err *types.NewAPIError) (BreakerEffectType, time.Time
 	// 换渠道/裁剪参数即可自愈，绝不计入渠道故障熔断。
 	if _, ok := loadbalancer.IsParamNotSupportedError(err); ok {
 		return BreakerNone, time.Time{}
+	}
+	// Responses API 不被支持：模型在、协议不在。按 (渠道, 模型) 冷却即可，
+	// 既不能当「模型不存在」走不可逆自动禁用，也不能因为落在 400 就完全不管
+	// —— 不管的话高优先级渠道会吞掉每一个 Responses 请求。
+	if loadbalancer.IsResponsesAPINotSupportedError(err) {
+		return BreakerResponsesAPINotSupported, time.Time{}
 	}
 	if loadbalancer.IsUpstreamRateLimitError(err) {
 		return BreakerRateLimit, time.Time{}
@@ -276,6 +283,24 @@ func DecideRelayRetry(c *gin.Context, err *types.NewAPIError, retryTimes int) Po
 	if _, ok := loadbalancer.ParseMaxCompletionTokensLimit(err); ok {
 		return PolicyDecision{Action: "retry", Reason: "max_completion_tokens_clamped", Source: "loadbalancer"}
 	}
+	// 以下三类必须**先于** alwaysSkipCodes / 状态码区间闸门判定（即位于
+	// 下面第 328 行那两道闸门之前）。
+	//
+	// 理由与上面那条完全相同：它们覆盖的上游错误落在 `bad_response_body` /
+	// `bad_response_status_code` 这几个错误码上 —— 前者在
+	// operation_setting.alwaysSkipCodes 的默认集合里，后者落到「400 不在
+	// retryRanges」的 status_not_retryable 兜底。放在闸门之后这些分支就是死代码：
+	// 生产实测渠道 #274 的 Responses 水合 400 因此从未换渠道重试，同一段多轮
+	// 历史每次重放都失败；又因为不换渠道、不清亲和性，连自愈的机会都没有。
+	if loadbalancer.IsReasoningHydrationError(err) {
+		return PolicyDecision{Action: "retry", Reason: "reasoning_hydration_failed", Source: "loadbalancer"}
+	}
+	if loadbalancer.IsCodexValidationBadRequest(err) {
+		return PolicyDecision{Action: "retry", Reason: "codex_validation_error", Source: "loadbalancer"}
+	}
+	if loadbalancer.IsResponsesAPINotSupportedError(err) {
+		return PolicyDecision{Action: "retry", Reason: "responses_api_not_supported", Source: "loadbalancer"}
+	}
 	// 智能负载：首字超时视为可重试，触发切换到下一个渠道。
 	//
 	// 必须排在 IsChannelError 之前：TTFT 超时的错误码是
@@ -332,14 +357,10 @@ func DecideRelayRetry(c *gin.Context, err *types.NewAPIError, retryTimes int) Po
 	if loadbalancer.IsThinkingModeHistoryError(err) {
 		return PolicyDecision{Action: "retry", Reason: "thinking_history_incompatible", Source: "loadbalancer"}
 	}
-	// 智能负载：Responses 推理水合（解密）失败（如 "reasoning hydration failed: Encrypted content could not be decrypted"），换渠道并脱敏重试
-	if loadbalancer.IsReasoningHydrationError(err) {
-		return PolicyDecision{Action: "retry", Reason: "reasoning_hydration_failed", Source: "loadbalancer"}
-	}
-	// 智能负载：Codex / Responses 校验不兼容错误（如 "invalid codex request"、code="invalid_responses_request"），换渠道重试，不熔断
-	if loadbalancer.IsCodexValidationBadRequest(err) {
-		return PolicyDecision{Action: "retry", Reason: "codex_validation_error", Source: "loadbalancer"}
-	}
+	// 水合失败 / Codex 校验 / Responses API 不支持这三类**不在这里判**：
+	// 它们必须在 alwaysSkipCodes 与状态码区间两道闸门之前就截获，见上方
+	// ParseMaxCompletionTokensLimit 之后的那组分支（此处若再写一遍就是
+	// 永远走不到的死代码，且会让读者误以为闸门之后仍有兜底）。
 	// 智能负载：上游模型不可用/已禁用/未配置（如 "model not found"、"model is disabled on this gateway"），换渠道重试
 	if loadbalancer.IsUpstreamModelUnavailableError(err) {
 		return PolicyDecision{Action: "retry", Reason: "model_unavailable_retry", Source: "loadbalancer"}

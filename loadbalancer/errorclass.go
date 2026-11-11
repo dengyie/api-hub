@@ -90,7 +90,16 @@ func hasExplicitRateLimitSignal(err *types.NewAPIError) bool {
 		strings.Contains(msg, "rate limit") ||
 		strings.Contains(msg, "rate_limit") ||
 		strings.Contains(msg, "too many requests") ||
-		strings.Contains(msg, "超额临时冻结") {
+		strings.Contains(msg, "超额临时冻结") ||
+		// 渠道 #377 生产实测：503 "当前并发已满（合法性 2/2），请稍后重试"。
+		// 这是**并发槽位瞬时打满**，与账号额度无关，几秒内即自愈。
+		// 不认它就会被 IsUpstreamRelayError 当成渠道故障熔 1800s，
+		// 并让自动禁用判据把它当凭据失效收集佐证。
+		strings.Contains(msg, "并发已满") ||
+		strings.Contains(msg, "并发数已满") ||
+		strings.Contains(msg, "concurrency limit") ||
+		strings.Contains(msg, "concurrent request limit") ||
+		strings.Contains(msg, "too many concurrent") {
 		return true
 	}
 	if code, typeStr, message, ok := openAIErrorFields(err.RelayError); ok {
@@ -223,26 +232,46 @@ func IsReasoningHydrationError(err *types.NewAPIError) bool {
 	if err == nil {
 		return false
 	}
-	msg := strings.ToLower(err.Error())
-	if strings.Contains(msg, "reasoning hydration failed") ||
-		(strings.Contains(msg, "encrypted content") && strings.Contains(msg, "could not be verified")) ||
-		(strings.Contains(msg, "encrypted content could not be decrypted")) {
+	if isHydrationMessage(strings.ToLower(err.Error())) {
 		return true
 	}
 	if oe, ok := err.RelayError.(types.OpenAIError); ok {
-		relayMsg := strings.ToLower(oe.Message)
-		if strings.Contains(relayMsg, "reasoning hydration failed") ||
-			(strings.Contains(relayMsg, "encrypted content") && strings.Contains(relayMsg, "could not be verified")) ||
-			(strings.Contains(relayMsg, "encrypted content could not be decrypted")) {
-			return true
-		}
-	} else if poe, ok := err.RelayError.(*types.OpenAIError); ok && poe != nil {
-		relayMsg := strings.ToLower(poe.Message)
-		if strings.Contains(relayMsg, "reasoning hydration failed") ||
-			(strings.Contains(relayMsg, "encrypted content") && strings.Contains(relayMsg, "could not be verified")) ||
-			(strings.Contains(relayMsg, "encrypted content could not be decrypted")) {
-			return true
-		}
+		return isHydrationMessage(strings.ToLower(oe.Message))
+	}
+	if poe, ok := err.RelayError.(*types.OpenAIError); ok && poe != nil {
+		return isHydrationMessage(strings.ToLower(poe.Message))
+	}
+	return false
+}
+
+// isHydrationMessage 是水合失败判据的唯一实现，三处调用点共用，避免口径漂移。
+//
+// 除了 "encrypted content could not be verified / decrypted" 这条主措辞，
+// 还要认 #274 生产实测的另一种说法：上游会明确讲「这个 item 是在**另一个
+// OpenAI 资源**（账号/项目）下创建的，必须用创建它的那个资源来访问」。
+// 它一个字都不含 "hydration"，旧判据完全认不出，于是被当成普通 400 透传，
+// 既不剥密文也不换渠道，同一段多轮历史每次重放都失败。
+func isHydrationMessage(msg string) bool {
+	if msg == "" {
+		return false
+	}
+	if strings.Contains(msg, "reasoning hydration failed") ||
+		(strings.Contains(msg, "encrypted content") && strings.Contains(msg, "could not be verified")) ||
+		strings.Contains(msg, "encrypted content could not be decrypted") ||
+		strings.Contains(msg, "encrypted content could not be parsed") {
+		return true
+	}
+	// "This item was created under a different OpenAI resource. Please use the
+	// same resource that created the item to access it."
+	if strings.Contains(msg, "created under a different") &&
+		(strings.Contains(msg, "openai resource") ||
+			strings.Contains(msg, "use the same resource")) {
+		return true
+	}
+	// 中文措辞（部分中转站本地化后透出）。
+	if strings.Contains(msg, "加密内容") &&
+		(strings.Contains(msg, "无法解密") || strings.Contains(msg, "无法解析") || strings.Contains(msg, "无法验证")) {
+		return true
 	}
 	return false
 }
@@ -553,6 +582,13 @@ func IsCodexValidationBadRequest(err *types.NewAPIError) bool {
 	if err == nil {
 		return false
 	}
+	// 会话标识冲突同样以 400 出现，但它描述的是**客户端请求头与已建立会话的
+	// 身份字段互相矛盾**（例如同一条 WS/SSE 会话上换了 request type 或来源），
+	// 换渠道重试即可自愈；绝不能因为它落在 400 就按参数/请求错误停掉重试，
+	// 更不能据此熔断整渠道。
+	if isCodexSessionIdentityConflict(err) {
+		return true
+	}
 	if err.StatusCode != http.StatusBadRequest {
 		return false
 	}
@@ -572,6 +608,146 @@ func IsCodexValidationBadRequest(err *types.NewAPIError) bool {
 		if strings.Contains(codeStr, "invalid_responses_request") || strings.Contains(codeStr, "invalid_codex_request") {
 			return true
 		}
+	}
+	return false
+}
+
+// isCodexSessionIdentityConflict 识别 Codex 会话身份标识冲突。
+//
+// 上游原话（生产实测）：
+//
+//	code: codex_session_identity_conflict
+//	message: 会话标识、来源或请求类型字段存在冲突
+//
+// 与单后端协议校验（invalid_codex_request）的区别只在**成因**：这里是同一会话
+// 被复用到不同身份上，换渠道/重连即可自愈；两者都绝不能计入渠道故障。
+func isCodexSessionIdentityConflict(err *types.NewAPIError) bool {
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "codex_session_identity_conflict") ||
+		strings.Contains(msg, "会话标识、来源或请求类型字段存在冲突") ||
+		strings.Contains(msg, "session identity conflict") {
+		return true
+	}
+	for _, value := range []any{err.RelayError} {
+		switch e := value.(type) {
+		case types.OpenAIError:
+			codeStr := strings.ToLower(fmt.Sprintf("%v", e.Code))
+			if strings.Contains(codeStr, "codex_session_identity_conflict") {
+				return true
+			}
+		case *types.OpenAIError:
+			if e != nil {
+				codeStr := strings.ToLower(fmt.Sprintf("%v", e.Code))
+				if strings.Contains(codeStr, "codex_session_identity_conflict") {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// IsResponsesAPINotSupportedError 识别「这条上游根本不支持 Responses API」。
+//
+// 生产实测（渠道 #368，cpolar 隧道后的 Codex 兼容层）：
+//
+//	400 api_not_supported
+//	Responses API does not supported, for Codex users: Downgrade to 0.80.0.
+//	| 不支持Responses API，Codex用户请降级到0.80.0。
+//
+// 这是**渠道能力**问题：该渠道永远服务不了 Responses 请求，但同一条渠道上的
+// chat/completions 完全正常。因此：
+//   - 必须换渠道重试（否则每个 Responses 请求都白撞一次）；
+//   - 熔断只能落在 (渠道, 模型) 这一对（ScopeModel）；
+//   - **绝不能**走 IsUpstreamModelUnavailableError 那条「模型不存在」的
+//     不可逆自动禁用判据——模型在，只是这个协议不被支持。
+func IsResponsesAPINotSupportedError(err *types.NewAPIError) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "responses api does not supported") ||
+		strings.Contains(msg, "responses api does not support") ||
+		strings.Contains(msg, "responses api is not supported") ||
+		strings.Contains(msg, "不支持responses api") ||
+		(strings.Contains(msg, "api_not_supported") && strings.Contains(msg, "responses")) {
+		return true
+	}
+	if oe, ok := err.RelayError.(types.OpenAIError); ok {
+		codeStr := strings.ToLower(fmt.Sprintf("%v", oe.Code))
+		msgStr := strings.ToLower(oe.Message)
+		if strings.Contains(codeStr, "api_not_supported") ||
+			strings.Contains(msgStr, "responses api does not supported") ||
+			strings.Contains(msgStr, "不支持responses api") {
+			return true
+		}
+	} else if poe, ok := err.RelayError.(*types.OpenAIError); ok && poe != nil {
+		codeStr := strings.ToLower(fmt.Sprintf("%v", poe.Code))
+		msgStr := strings.ToLower(poe.Message)
+		if strings.Contains(codeStr, "api_not_supported") ||
+			strings.Contains(msgStr, "responses api does not supported") ||
+			strings.Contains(msgStr, "不支持responses api") {
+			return true
+		}
+	}
+	return false
+}
+
+// IsSelfHealingQuotaError 识别「会自动恢复的周期性/重置型额度耗尽」。
+//
+// 与 IsUpstreamQuotaError 的区别是**时间维度**：后者描述的是「这条凭据没钱了」
+// ——充值或用完即止，靠熔断或人工处理；这里描述的是一天后/一个周期后必然
+// 归零重置的额度，**不做任何动作它自己就会好**。
+//
+// 因此这类错误：
+//   - 可以换渠道重试（当轮确实拿不到这条渠道的额度）；
+//   - 但**绝不能**计入不可逆的自动禁用判据 —— 把一个「明天 0 点自动恢复」的
+//     渠道永久摘掉，等于每天都要人工救一次。
+//
+// 生产实测：渠道 #394 的免费模型池每天 10M token，耗尽后返回
+// "The shared daily limit for the free models is exhausted ... resets at
+// 00:00 Moscow time"，旧判据把它当额度耗尽，持续收集佐证。
+func IsSelfHealingQuotaError(err *types.NewAPIError) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	// 明确的「会重置」信号：出现任何一个，就说明这是周期额度而非欠费。
+	if strings.Contains(msg, "resets at") ||
+		strings.Contains(msg, "resets in") ||
+		strings.Contains(msg, "reset at") ||
+		strings.Contains(msg, "will reset") ||
+		strings.Contains(msg, "点重置") ||
+		strings.Contains(msg, "重置") {
+		return true
+	}
+	// 周期型额度标识。
+	if strings.Contains(msg, "free_daily_limit_exceeded") ||
+		strings.Contains(msg, "daily usage limit exceeded") ||
+		strings.Contains(msg, "free usage limit reached") ||
+		strings.Contains(msg, "quota_7d") ||
+		strings.Contains(msg, "7 天额度") ||
+		strings.Contains(msg, "七天额度") ||
+		strings.Contains(msg, "今日可用额度不足") ||
+		strings.Contains(msg, "已达到周期限制") ||
+		strings.Contains(msg, "monthly quota") ||
+		strings.Contains(msg, "免费模型") ||
+		strings.Contains(msg, "throttling.burstrate") ||
+		strings.Contains(msg, "throttling exception") ||
+		strings.Contains(msg, "exceeded your current quota for the day") {
+		return true
+	}
+	// "reached your daily/weekly limit ... 24 hours" 这类带恢复时间窗的措辞。
+	if (strings.Contains(msg, "daily") || strings.Contains(msg, "weekly") || strings.Contains(msg, "today")) &&
+		(strings.Contains(msg, "limit") || strings.Contains(msg, "quota") || strings.Contains(msg, "exhausted")) {
+		return true
+	}
+	if strings.Contains(msg, "24 hour") || strings.Contains(msg, "daily limit") {
+		return true
+	}
+	// TPM/RPM 之类的频次额度本身就是自动恢复的。
+	if rateLimitUnitRe.MatchString(msg) {
+		return true
 	}
 	return false
 }

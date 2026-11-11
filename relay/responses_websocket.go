@@ -239,6 +239,9 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 	policy := service.RequestPolicy(c)
 	modelName := create.Request.Model
 	started := time.Now()
+	// attemptIdx 记录本次会话已经用掉的重试序号。预接收阶段的拒绝发生在
+	// 重试循环之外，那里要重算剩余重试预算就只能靠它（retry 是循环内的局部变量）。
+	attemptIdx := 0
 	var info *relaycommon.RelayInfo
 	billingPrepared := false
 	defer func() {
@@ -302,6 +305,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 	} else {
 		retry := &service.RetryParam{Ctx: c, TokenGroup: common.GetContextKeyString(c, appconstant.ContextKeyUsingGroup), ModelName: modelName, RequestPath: c.Request.URL.Path, Retry: common.GetPointer(0)}
 		for ; retry.GetRetry() <= common.RetryTimes(); retry.IncreaseRetry() {
+			attemptIdx = retry.GetRetry()
 			channel, selectErr := selectResponsesWSChannel(c, modelName, retry)
 			if selectErr != nil {
 				logger.LogError(c, selectErr.Error())
@@ -344,6 +348,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				service.ProcessChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, info.ApiKey, channel.GetAutoBan()), apiErr, info)
 				if loadbalancer.IsReasoningHydrationError(apiErr) {
 					common.SetContextKey(c, appconstant.ContextKeyStripResponsesReasoning, true)
+					service.ClearCurrentChannelAffinityCache(c)
 				}
 				if decision.Action == "retry" {
 					continue
@@ -463,9 +468,26 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 						// rejected request; keep the client-facing type stable.
 						rejection.Error = &types.OpenAIError{Type: "invalid_request_error", Message: event.Message, Code: event.Code}
 					}
-					rejected := types.WithOpenAIError(*rejection.Error, rejection.Status, types.ErrOptionWithSkipRetry())
+					// 预接收阶段的拒绝同样是「这次尝试失败」，必须与 HTTP 路径同源地
+					// 走一遍失败记账。旧代码是直接
+					// `WithOpenAIError(..., ErrOptionWithSkipRetry)` 返回：既不计数、
+					// 不熔断、不清亲和性、不剥密文，客户端只看到一条错误帧，而这条
+					// 坏渠道仍然牢牢钉住整个会话 —— 生产实测 #274 的跨账号水合 400
+					// 在 WS 上就是这样无限重放的。
+					rejected := types.WithOpenAIError(*rejection.Error, rejection.Status)
 					if rejected.StatusCode < 400 || rejected.StatusCode > 599 {
 						rejected.StatusCode = http.StatusBadRequest
+					}
+					decision := service.DecideRelayRetry(c, rejected, common.RetryTimes()-attemptIdx)
+					service.RecordPolicyFailure(c, s.lockedChannelID, rejected, decision)
+					if loadbalancer.IsReasoningHydrationError(rejected) {
+						common.SetContextKey(c, appconstant.ContextKeyStripResponsesReasoning, true)
+						// 这条渠道解不开这份密文：把会话从它的亲和性上摘下来，
+						// 否则下一次 response.create 仍旧选回它。
+						service.ClearCurrentChannelAffinityCache(c)
+					}
+					if ch, chErr := appmodel.CacheGetChannel(s.lockedChannelID); chErr == nil && ch != nil {
+						service.ProcessChannelError(c, *types.NewChannelError(ch.Id, ch.Type, ch.Name, ch.ChannelInfo.IsMultiKey, info.ApiKey, ch.GetAutoBan()), rejected, info)
 					}
 					return rejected
 				}

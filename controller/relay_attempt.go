@@ -317,6 +317,10 @@ func executeRelayAttempt(
 	}
 	if failureEval.StripResponsesReasoning {
 		common.SetContextKey(c, constant.ContextKeyStripResponsesReasoning, true)
+		// 亲和性缓存会把这条会话钉在「解不开这份密文」的那个渠道上。只剥密文
+		// 不清亲和性的话，下一次尝试（以及下一次请求）仍会选回同一条渠道，
+		// 自愈只对本次重试有效，下一次请求立刻复现。
+		service.ClearCurrentChannelAffinityCache(c)
 		logger.LogWarn(c, fmt.Sprintf("渠道 #%d [%s] 上游推理水合失败 (Encrypted content cannot be decrypted)，已标记后续重试自动清洗加密项并自愈", channel.Id, relayInfo.OriginModelName))
 	}
 	processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, relayInfo)

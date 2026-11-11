@@ -75,26 +75,60 @@ type paramStripKey struct {
 // 不同模型上限可以差一个数量级。
 var maxTokensLimitLearned sync.Map // map[int]map[string]uint
 
-// maxTokensLimitRe 解析上游回传的 max_completion_tokens 上限。
-// 兼容中英文与不同措辞：只认「超限 + 上限数字」这一组语义。
-var maxTokensLimitRe = regexp.MustCompile(
-	`(?is)max_completion_tokens\s+is\s+too\s+large.*?supports\s+at\s+most\s+(\d+)`)
+// maxTokensLimitPatterns 解析上游回传的 token 上限。按顺序取第一条命中的。
+//
+// 只认「**点名了 token 上限参数名** 且 报文里给出了上限数字」这一组语义：
+// 每条模式都以 `max_tokens|max_completion_tokens|max_output_tokens` 起头，
+// 否则任意一句「xxx 最多 100」都会被误认成上限，进而把用户请求的
+// max_tokens 悄悄钳小 —— 那比不钳更糟（截断比报错更难发现）。
+//
+// 真实生产报文（都在线上抓到了）：
+//   - "max_completion_tokens is too large: 384000. This model supports at most 262144 completion tokens."
+//   - "For this route max_tokens must be an integer from 1 to 65536."   ← 渠道 #394，旧正则不认
+//   - "max_output_tokens must be less than or equal to 128000"
+//   - "max_tokens: 200000 is greater than the maximum allowed value 65536"
+//
+// 旧实现只认第一条，于是 #394 的「范围式上限」从未被学会：每个请求都先吃一个
+// 400 再重试，且永不自愈。
+var maxTokensLimitPatterns = []*regexp.Regexp{
+	// "max_completion_tokens is too large: 384000. This model supports at most 262144 completion tokens."
+	// 「supports at most N」是最稳的措辞：语义唯一，不会被数字/单位干扰。
+	regexp.MustCompile(`(?is)(?:max_completion_tokens|max_output_tokens|max_tokens)[^\n]{0,200}?supports\s+at\s+most\s+(\d+)`),
+
+	// "For this route max_tokens must be an integer from 1 to 65536."
+	// 范围式：上界是「to」后面那个数，下界（1）忽略。
+	regexp.MustCompile(`(?is)(?:max_completion_tokens|max_output_tokens|max_tokens)\s*[^\n]{0,80}?\bmust\s+be\s+an?\s+integer\s+(?:from|between)\s+\d+\s+(?:to|and)\s+(\d+)`),
+
+	// "max_tokens: 200000 is greater than the maximum allowed value 65536"
+	regexp.MustCompile(`(?is)(?:max_completion_tokens|max_output_tokens|max_tokens)\s*[:=]?\s*\d+\s+is\s+(?:greater|larger|more)\s+than\s+(?:the\s+)?(?:maximum|max)(?:\s+allowed)?(?:\s+value)?\s*(?:of\s+)?[:=]?\s*(\d+)`),
+
+	// "max_output_tokens must be less than or equal to 128000" / "<= 128000" / "≤ 128000"
+	regexp.MustCompile(`(?is)(?:max_completion_tokens|max_output_tokens|max_tokens)[^\n]{0,120}?(?:less\s+than\s+or\s+equal\s+to|not\s+exceed|<=|≤)\s*(\d+)`),
+
+	// "max_tokens: 200000 at most 65536" / "no more than 65536" / "up to 65536"
+	regexp.MustCompile(`(?is)(?:max_completion_tokens|max_output_tokens|max_tokens)[^\n]{0,120}?(?:at\s+most|no\s+more\s+than|up\s+to|maximum\s+(?:is|of)?\s*[:=]?)\s*(\d+)`),
+}
 
 // ParseMaxCompletionTokensLimit 从上游 400 报文里解析该模型允许的
-// max_completion_tokens 上限。未命中返回 (0, false)。
+// max_tokens / max_completion_tokens / max_output_tokens 上限。
+// 未命中返回 (0, false)。
 func ParseMaxCompletionTokensLimit(err *types.NewAPIError) (uint, bool) {
 	if err == nil {
 		return 0, false
 	}
-	m := maxTokensLimitRe.FindStringSubmatch(err.Error())
-	if m == nil {
-		return 0, false
+	msg := err.Error()
+	for _, re := range maxTokensLimitPatterns {
+		m := re.FindStringSubmatch(msg)
+		if m == nil {
+			continue
+		}
+		parsed, perr := strconv.ParseUint(m[1], 10, 64)
+		if perr != nil || parsed == 0 {
+			continue
+		}
+		return uint(parsed), true
 	}
-	parsed, perr := strconv.ParseUint(m[1], 10, 64)
-	if perr != nil || parsed == 0 {
-		return 0, false
-	}
-	return uint(parsed), true
+	return 0, false
 }
 
 // RecordMaxCompletionTokensLimit 记住该渠道该模型的上限。
@@ -447,6 +481,16 @@ func isReasoningEffortNotSupportedMessage(msgLower, msg string) bool {
 // 不标记、不裁剪，每个请求稳定白烧一轮报错，且永不自愈。
 func IsParamNotSupportedError(err *types.NewAPIError) (string, bool) {
 	if err == nil {
+		return "", false
+	}
+	// Responses API 整体不被该上游支持，不是「某个参数有问题」。
+	// 报文 "Responses API does not supported" 里的 "does not support"
+	// 会被散文式模式（reDoesNotSupport）误抓成参数名 "ed"，后果有两层：
+	//   1. ProcessChannelError 会学到一条不存在的参数裁剪；
+	//   2. 熔断分类把它当参数问题直接 BreakerNone，于是 #368 的
+	//      模型级冷却永远不会生效，每个 Responses 请求都白撞一次。
+	// 必须先于任何模式匹配排除。
+	if IsResponsesAPINotSupportedError(err) {
 		return "", false
 	}
 	msg := err.Error()

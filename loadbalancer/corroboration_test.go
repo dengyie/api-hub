@@ -345,3 +345,83 @@ func TestCorroborationEveryClassHasExplicitScope(t *testing.T) {
 		require.True(t, ok, "类别 %q 未在 corroborationScopeByClass 登记作用域——先想清楚它的证据按模型还是按渠道分桶，再回来加", class)
 	}
 }
+
+// TestCorroborationReadPathsHonorWindowExpiry 钉住「读侧也必须过期」。
+//
+// 写侧一直有过期判定，读侧曾经没有：status_code / keyword / channel_error
+// 三类判定的是**账号级**失效，禁用动作是整条渠道，证据必须跨模型共用渠道桶
+// （见 corroborationScopeByClass）。于是「窗口里 A 模型失败一次 → 过一个
+// 窗口 → B 模型偶发一次」时，读侧会把上一窗口的 1 次也算进来，直接报
+// 「2 次、达阈值」，把一条健康的渠道不可逆地摘掉 —— 而写侧从头到尾都是对的，
+// 错误只存在于读侧的那一次加法里。
+//
+// 症状最难看的地方是它只在「跨模型 + 跨窗口 + 阈值 2」这条窄组合上出现，
+// 单模型压测完全测不出来；生产上表现为渠道莫名下线，日志里却只有一次真实失败。
+func TestCorroborationReadPathsHonorWindowExpiry(t *testing.T) {
+	defer resetCorroborationForTest()()
+	prev := GetPolicy()
+	SetPolicy(corroborationPolicyForTest(2, 600))
+	t.Cleanup(func() { SetPolicy(prev) })
+
+	ready, _ := RecordAutoDisableSignal(1, "model-a", CorroborationClassStatusCode)
+	require.False(t, ready)
+
+	// 把窗口起点拨到窗口之外：这条记录在语义上已经不存在了。
+	key := corroborationKey(1, corroborationBucketModel(CorroborationClassStatusCode, "model-a"), CorroborationClassStatusCode)
+	corroborationRegistry.mu.Lock()
+	require.NotNil(t, corroborationRegistry.m[key])
+	corroborationRegistry.m[key].windowStart = time.Now().Add(-601 * time.Second)
+	corroborationRegistry.mu.Unlock()
+
+	assert.Equal(t, 0, CorroborationCount(1, "model-a", CorroborationClassStatusCode),
+		"过期的佐证必须按 0 计 —— 读侧漏掉过期判定会把一条健康渠道误摘")
+	assert.False(t, PeekAutoDisableCorroboration(1, "model-b", CorroborationClassStatusCode),
+		"另一模型的首次偶发不得被上一窗口的证据顶到阈值")
+
+	ready, count := RecordAutoDisableSignal(1, "model-b", CorroborationClassStatusCode)
+	assert.False(t, ready, "跨模型跨窗口不构成互相印证")
+	assert.Equal(t, 1, count, "过期后必须从 1 重新计")
+}
+
+// TestCorroborationWindowIsAuthoritativeUnderEscalation 复现并锁定生产上的
+// 「佐证永远凑不齐」死锁。
+//
+// 生产配置：熔断 cooldown_seconds=300、递增到 600/900/1200s，而佐证窗口
+// 是 600s。第二次跳闸后渠道已被熔断 900s，比整个佐证窗口还长 —— 下一个
+// 信号到达时，上一窗口早已过期。这时：
+//
+//   - 写侧正确地重建状态、从 1 计数（这是设计：隔了一个窗口的两次失败
+//     不构成互相印证）；
+//   - 读侧如果仍报旧计数，PEEK 会告诉调用方「已达阈值」，事件流标签与
+//     实际禁用动作互相矛盾；反过来若读侧也过期，就如实报 1/3。
+//
+// 结论是：这套机制在「冷却时长增长快于佐证窗口」时**不会**自动禁用，
+// 这是 fail-safe 的正确方向 —— 宁可让一条可疑渠道靠熔断反复避让，也不能
+// 用跨越窗口的陈旧证据做不可逆摘除。要让它生效，应当调大窗口或调小
+// escalation cap；这里只保证读写的窗口语义严格一致，不偷偷放宽。
+func TestCorroborationWindowIsAuthoritativeUnderEscalation(t *testing.T) {
+	defer resetCorroborationForTest()()
+	prev := GetPolicy()
+	SetPolicy(corroborationPolicyForTest(3, 600))
+	t.Cleanup(func() { SetPolicy(prev) })
+
+	// 第一次跳闸：1/3
+	ready, count := RecordAutoDisableSignal(7, "m", CorroborationClassModelUnavailable)
+	require.False(t, ready)
+	require.Equal(t, 1, count)
+
+	// 熔断递增到 900s：下一次失败已在佐证窗口之外。
+	key := corroborationKey(7, corroborationBucketModel(CorroborationClassModelUnavailable, "m"), CorroborationClassModelUnavailable)
+	corroborationRegistry.mu.Lock()
+	corroborationRegistry.m[key].windowStart = time.Now().Add(-901 * time.Second)
+	corroborationRegistry.mu.Unlock()
+
+	assert.Equal(t, 0, CorroborationCount(7, "m", CorroborationClassModelUnavailable),
+		"上一个熔断周期留下的计数不得跨窗口续命")
+	assert.False(t, PeekAutoDisableCorroboration(7, "m", CorroborationClassModelUnavailable),
+		"peek 必须与 record 同口径：此刻只有 1/3")
+
+	ready, count = RecordAutoDisableSignal(7, "m", CorroborationClassModelUnavailable)
+	assert.False(t, ready, "不得据陈旧证据触发不可逆禁用")
+	assert.Equal(t, 1, count, "新窗口从 1 起计")
+}

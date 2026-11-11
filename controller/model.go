@@ -420,6 +420,10 @@ func writeRetrieveModelNotFound(c *gin.Context, modelType int, modelId string) {
 
 func RetrieveModel(c *gin.Context, modelType int) {
 	modelId := c.Param("model")
+	// 路由用 catch-all 注册（模型 ID 可以带 `/`），Gin 会把前导斜杠一起
+	// 捕获进参数：`/v1/models/hy4` 取到的是 `/hy4`。不剥掉这个前导斜杠，
+	// 后续的模型存在性判断拿 "/hy4" 去比对，必然不命中，返回 404。
+	modelId = strings.TrimPrefix(modelId, "/")
 	if modelType == constant.ChannelTypeGemini {
 		modelId = strings.TrimPrefix(modelId, "models/")
 	}
