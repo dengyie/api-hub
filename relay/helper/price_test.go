@@ -769,7 +769,7 @@ func TestModelPriceHelperTieredFreeModelExemption(t *testing.T) {
 		operation_setting.GetQuotaSetting().EnableFreeModelPreConsume = oldEnableFree
 	})
 
-	// When EnableFreeModelPreConsume is false (the default in production), free tiered models
+	// When EnableFreeModelPreConsume is false (default in code is true), free tiered models
 	// must be marked FreeModel: true and have 0 QuotaToPreConsume to bypass NewBillingSession.
 	operation_setting.GetQuotaSetting().EnableFreeModelPreConsume = false
 	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())

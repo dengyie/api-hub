@@ -3,6 +3,7 @@ package service
 import (
 	"math"
 	"math/rand"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/dengyie/apihub/common"
@@ -10,6 +11,8 @@ import (
 	"github.com/dengyie/apihub/pkg/billingexpr"
 	relaycommon "github.com/dengyie/apihub/relay/common"
 	"github.com/dengyie/apihub/relaykit/dto"
+	relaykittypes "github.com/dengyie/apihub/relaykit/types"
+	"github.com/dengyie/apihub/setting/operation_setting"
 	"github.com/dengyie/apihub/types"
 	"github.com/gin-gonic/gin"
 	"github.com/shopspring/decimal"
@@ -435,6 +438,154 @@ func TestPrepareTieredBillingForSelectedGroupPaidToFreeKeepsFreeModelFalse(t *te
 	assert.False(t, relayInfo.PriceData.FreeModel)
 	assert.Empty(t, billing.reserveTargets)
 	assert.Equal(t, 50_000, relayInfo.FinalPreConsumedQuota)
+}
+
+func TestPrepareTieredBillingForSelectedGroupZeroCostFreeModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	oldEnableFree := operation_setting.GetQuotaSetting().EnableFreeModelPreConsume
+	t.Cleanup(func() {
+		operation_setting.GetQuotaSetting().EnableFreeModelPreConsume = oldEnableFree
+	})
+
+	const freeExpr = `tier("free", fixed(0))`
+
+	t.Run("exempts zero-quota wallet and unsubscribed caller when free-model pre-consume is disabled", func(t *testing.T) {
+		for _, tc := range []struct {
+			name          string
+			userID        int
+			billingPref   string
+			initialGroup  float64
+			selectedGroup float64
+		}{
+			{
+				name:          "zero-quota wallet on paid group",
+				userID:        703,
+				billingPref:   "wallet_only",
+				initialGroup:  1.0,
+				selectedGroup: 1.0,
+			},
+			{
+				name:          "unsubscribed subscription_only on paid group",
+				userID:        704,
+				billingPref:   "subscription_only",
+				initialGroup:  1.0,
+				selectedGroup: 1.0,
+			},
+			{
+				name:          "free-to-paid group retry on zero-cost tiered model stays free",
+				userID:        705,
+				billingPref:   "wallet_only",
+				initialGroup:  0,
+				selectedGroup: 0.50,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				truncate(t)
+				seedUser(t, tc.userID, 0)
+				operation_setting.GetQuotaSetting().EnableFreeModelPreConsume = false
+
+				relayInfo := &relaycommon.RelayInfo{
+					UserId:          tc.userID,
+					IsPlayground:    true,
+					OriginModelName: "hy3",
+					UserSetting: dto.UserSetting{
+						BillingPreference: tc.billingPref,
+					},
+					TieredBillingSnapshot: &billingexpr.BillingSnapshot{
+						BillingMode:               "tiered_expr",
+						ExprString:                freeExpr,
+						ExprHash:                  billingexpr.ExprHashString(freeExpr),
+						GroupRatio:                tc.initialGroup,
+						EstimatedQuotaBeforeGroup: 0,
+						EstimatedQuotaAfterGroup:  0,
+						QuotaPerUnit:              testQuotaPerUnit,
+					},
+					PriceData: types.PriceData{
+						FreeModel:      true,
+						GroupRatioInfo: types.GroupRatioInfo{GroupRatio: tc.selectedGroup},
+					},
+				}
+				ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+
+				require.Nil(t, PrepareTieredBillingForSelectedGroup(ctx, relayInfo))
+				assert.Nil(t, relayInfo.Billing)
+				assert.True(t, relayInfo.PriceData.FreeModel)
+				assert.Equal(t, tc.selectedGroup, relayInfo.TieredBillingSnapshot.GroupRatio)
+				assert.Equal(t, 0, relayInfo.TieredBillingSnapshot.EstimatedQuotaAfterGroup)
+			})
+		}
+	})
+
+	t.Run("enforces pre-consume gating when EnableFreeModelPreConsume is true", func(t *testing.T) {
+		t.Run("rejects zero-quota caller", func(t *testing.T) {
+			truncate(t)
+			const zeroUserID = 706
+			seedUser(t, zeroUserID, 0)
+			operation_setting.GetQuotaSetting().EnableFreeModelPreConsume = true
+
+			zeroInfo := &relaycommon.RelayInfo{
+				UserId:          zeroUserID,
+				IsPlayground:    true,
+				OriginModelName: "hy3",
+				UserSetting: dto.UserSetting{
+					BillingPreference: "wallet_only",
+				},
+				TieredBillingSnapshot: &billingexpr.BillingSnapshot{
+					BillingMode:               "tiered_expr",
+					ExprString:                freeExpr,
+					ExprHash:                  billingexpr.ExprHashString(freeExpr),
+					GroupRatio:                1.0,
+					EstimatedQuotaBeforeGroup: 0,
+					EstimatedQuotaAfterGroup:  0,
+					QuotaPerUnit:              testQuotaPerUnit,
+				},
+				PriceData: types.PriceData{
+					FreeModel:      true,
+					GroupRatioInfo: types.GroupRatioInfo{GroupRatio: 1.0},
+				},
+			}
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			apiErr := PrepareTieredBillingForSelectedGroup(ctx, zeroInfo)
+			require.NotNil(t, apiErr)
+			assert.Equal(t, relaykittypes.ErrorCodeInsufficientUserQuota, apiErr.GetErrorCode())
+			assert.Nil(t, zeroInfo.Billing)
+		})
+
+		t.Run("starts billing session for funded caller", func(t *testing.T) {
+			truncate(t)
+			const fundedUserID = 707
+			seedUser(t, fundedUserID, 100)
+			operation_setting.GetQuotaSetting().EnableFreeModelPreConsume = true
+
+			fundedInfo := &relaycommon.RelayInfo{
+				UserId:          fundedUserID,
+				IsPlayground:    true,
+				OriginModelName: "hy3",
+				UserQuota:       100,
+				UserSetting: dto.UserSetting{
+					BillingPreference: "wallet_only",
+				},
+				TieredBillingSnapshot: &billingexpr.BillingSnapshot{
+					BillingMode:               "tiered_expr",
+					ExprString:                freeExpr,
+					ExprHash:                  billingexpr.ExprHashString(freeExpr),
+					GroupRatio:                1.0,
+					EstimatedQuotaBeforeGroup: 0,
+					EstimatedQuotaAfterGroup:  0,
+					QuotaPerUnit:              testQuotaPerUnit,
+				},
+				PriceData: types.PriceData{
+					FreeModel:      true,
+					GroupRatioInfo: types.GroupRatioInfo{GroupRatio: 1.0},
+				},
+			}
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			require.Nil(t, PrepareTieredBillingForSelectedGroup(ctx, fundedInfo))
+			require.NotNil(t, fundedInfo.Billing)
+			assert.False(t, fundedInfo.PriceData.FreeModel)
+		})
+	})
 }
 
 func TestPrepareTieredBillingForSelectedGroupTopUpArrearsAllowsNegativeBalance(t *testing.T) {

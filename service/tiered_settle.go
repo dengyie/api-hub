@@ -8,6 +8,7 @@ import (
 	relaycommon "github.com/dengyie/apihub/relay/common"
 	"github.com/dengyie/apihub/relaykit/dto"
 	"github.com/dengyie/apihub/relaykit/types"
+	"github.com/dengyie/apihub/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 )
 
@@ -183,9 +184,17 @@ func PrepareTieredBillingForSelectedGroup(c *gin.Context, relayInfo *relaycommon
 		// already yields 0 for a zero group ratio.
 		return nil
 	}
+	if relayInfo.Billing == nil && snap.EstimatedQuotaAfterGroup == 0 && !operation_setting.GetQuotaSetting().EnableFreeModelPreConsume {
+		// Free tiered models (e.g. tier("free", fixed(0)) or p*0) skip
+		// pre-consumption just like free ratio/price models when
+		// EnableFreeModelPreConsume is disabled; keep FreeModel intact so
+		// zero-quota and unsubscribed callers are not rejected before settlement.
+		return nil
+	}
 
-	// The selected group is paid; clear a FreeModel flag frozen when the
-	// initial group was free so downstream state stays consistent.
+	// The selected group is paid (or free-model pre-consume is required); clear
+	// a FreeModel flag frozen when pre-consume was skipped so downstream state
+	// stays consistent.
 	relayInfo.PriceData.FreeModel = false
 
 	if relayInfo.Billing == nil {

@@ -202,7 +202,10 @@ export function ChannelQuickOptions(props: ChannelQuickOptionsProps) {
             )
           }
         >
-          <SelectTrigger size='sm' className='h-7 w-[120px] text-xs'>
+          <SelectTrigger
+            size='sm'
+            className='h-7 max-w-[190px] min-w-[120px] text-xs'
+          >
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
