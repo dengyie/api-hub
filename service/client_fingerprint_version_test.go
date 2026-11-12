@@ -17,10 +17,12 @@ func resetFingerprintUAState(t *testing.T) {
 	t.Helper()
 	activeCodexFingerprintUA.Store(nil)
 	activeClaudeFingerprintUA.Store(nil)
-	latestClaudeClientVersionCache.Lock()
-	latestClaudeClientVersionCache.version = ""
-	latestClaudeClientVersionCache.expiresAt = time.Time{}
-	latestClaudeClientVersionCache.Unlock()
+	for _, cache := range []*clientVersionCache{&latestCodexClientVersion, &latestClaudeClientVersionCache} {
+		cache.Lock()
+		cache.version = ""
+		cache.expiresAt = time.Time{}
+		cache.Unlock()
+	}
 }
 
 func TestActiveFingerprintUAFallsBackToDefault(t *testing.T) {
@@ -174,25 +176,18 @@ func TestLatestClaudeClientVersionRejectsDirtyVersion(t *testing.T) {
 func TestSyncFingerprintVersionUpdatesAtomic(t *testing.T) {
 	resetFingerprintUAState(t)
 
+	// 用真实 fetch 链路：把全局发布源指向本地桩（helper 会负责恢复 URL 并清空缓存）
 	codexServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"name":"0.167.2","draft":false,"prerelease":false}`)
 	}))
 	defer codexServer.Close()
+	stubCodexReleaseURL(t, codexServer.URL)
 
 	claudeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"version":"2.1.322"}`)
 	}))
 	defer claudeServer.Close()
-
-	// 用真实 fetch 链路：把全局缓存指向本地桩
-	origCodexURL := codexLatestReleaseURL
-	codexLatestReleaseURL = codexServer.URL
-	origClaudeURL := claudeCodeLatestReleaseURL
-	claudeCodeLatestReleaseURL = claudeServer.URL
-	t.Cleanup(func() {
-		codexLatestReleaseURL = origCodexURL
-		claudeCodeLatestReleaseURL = origClaudeURL
-	})
+	stubClaudeReleaseURL(t, claudeServer.URL)
 
 	ctx := context.Background()
 	syncCodexFingerprintVersion(ctx, codexServer.Client())
@@ -332,5 +327,52 @@ func TestRunClientFingerprintSyncOnceReentrant(t *testing.T) {
 	// 走不到 fetch：atomic 仍为空
 	if got := ActiveCodexFingerprintVersion(); got != "" {
 		t.Fatalf("reentrant call must be skipped, got %q", got)
+	}
+}
+
+// 单轮 panic 只损失该轮，不外溢：后续调用照常执行（模拟 gopool 循环存活）。
+// runClientFingerprintSyncRound 是生产 ticker 循环里实际调用的单轮执行体，
+// 这里直接驱动它验证 recover 边界。
+func TestClientFingerprintSyncRoundRecoversFromPanic(t *testing.T) {
+	resetFingerprintUAState(t)
+
+	// 让 runClientFingerprintSyncOnce 内部 panic：开关闭合 + fetch 链路正常，
+	// 但在桩 handler 里故意触发无法恢复的状态是不现实的——改为直接注入一个
+	// 会 panic 的 fetch 函数到 codex 缓存。
+	origFetch := latestCodexClientVersion.fetch
+	latestCodexClientVersion.fetch = func(ctx context.Context, client *http.Client, releaseURL string) (string, error) {
+		panic("boom: injected fetch panic")
+	}
+	t.Cleanup(func() {
+		latestCodexClientVersion.fetch = origFetch
+		latestCodexClientVersion.Lock()
+		latestCodexClientVersion.version = ""
+		latestCodexClientVersion.expiresAt = time.Time{}
+		latestCodexClientVersion.Unlock()
+	})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"name":"0.167.2","draft":false,"prerelease":false}`)
+	}))
+	defer server.Close()
+	stubCodexReleaseURL(t, server.URL)
+
+	// runClientFingerprintSyncOnce 从 GetHttpClient() 取 client；测试进程未跑
+	// InitHttpClient，包级 httpClient 为 nil，覆写为桩 client。
+	origHTTPClient := httpClient
+	httpClient = server.Client()
+	t.Cleanup(func() { httpClient = origHTTPClient })
+
+	// 第一轮：codex fetch panic —— 不得外溢（外溢则本测试进程崩溃）
+	runClientFingerprintSyncRound()
+	if got := ActiveCodexFingerprintVersion(); got != "" {
+		t.Fatalf("panicked round must not sync, got %q", got)
+	}
+
+	// 恢复 fetch 后下一轮照常同步（模拟 ticker 循环存活到下一个 tick）
+	latestCodexClientVersion.fetch = origFetch
+	runClientFingerprintSyncRound()
+	if got := ActiveCodexFingerprintVersion(); got != "0.167.2" {
+		t.Fatalf("next round after panic must sync normally, got %q", got)
 	}
 }

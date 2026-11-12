@@ -127,10 +127,23 @@ func StartClientFingerprintSyncTask() {
 			ticker := time.NewTicker(clientFingerprintSyncInterval)
 			defer ticker.Stop()
 			for range ticker.C {
-				runClientFingerprintSyncOnce()
+				runClientFingerprintSyncRound()
 			}
 		})
 	})
+}
+
+// runClientFingerprintSyncRound 是 ticker 循环的单轮执行体。gopool 的 recover
+// 只覆盖单次 task：panic 一旦逃出 for 循环，整个同步 goroutine 就永久死亡
+// （sync.Once 不会重新跑），UA 从此冻结在旧版本且无告警。每轮独立 recover，
+// 把 panic 损失限制在单个 tick 内。独立成函数以便测试直接驱动。
+func runClientFingerprintSyncRound() {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.LogError(context.Background(), fmt.Sprintf("client fingerprint sync round panicked, recovering until next tick: %v", r))
+		}
+	}()
+	runClientFingerprintSyncOnce()
 }
 
 var (
@@ -158,7 +171,7 @@ func runClientFingerprintSyncOnce() {
 }
 
 func syncCodexFingerprintVersion(ctx context.Context, client *http.Client) {
-	// 缓存层（codexClientVersionCache.get）返回的值在 fetch 时已经过了
+	// 缓存层（clientVersionCache.get）返回的值在 fetch 时已经过了
 	// validateFingerprintVersion 校验，这里直接采纳。
 	version, err := GetLatestCodexClientVersion(ctx, client)
 	if err != nil {
