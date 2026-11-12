@@ -681,4 +681,17 @@ func TestContextualReasoningHydrationOpaque400(t *testing.T) {
 		assert.False(t, IsContextualReasoningHydration(c, err), "5xx 不属于不透明 400 水合族")
 		assert.False(t, decision.StripResponsesReasoning)
 	})
+
+	t.Run("403/402 等其它 4xx 不被劫持为水合失败", func(t *testing.T) {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		common.SetContextKey(c, constant.ContextKeyResponsesHadReasoning, true)
+		// 生产实测（19:45 链 #379）：请求带密文历史时，同链后续渠道的额度/订阅
+		// 403 若也落进该判据，会打出误导性的「推理水合失败」日志。
+		err := types.NewOpenAIError(errors.New("The available quota is insufficient for this request."), types.ErrorCodeInsufficientUserQuota, http.StatusForbidden)
+		decision := EvaluateRelayFailure(c, err, 2)
+		assert.False(t, IsContextualReasoningHydration(c, err))
+		assert.False(t, decision.StripResponsesReasoning)
+		assert.Equal(t, BreakerQuota, decision.BreakerEffect)
+		assert.Equal(t, "upstream_quota_exhausted", decision.PolicyDecision.Reason)
+	})
 }

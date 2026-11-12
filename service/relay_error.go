@@ -114,7 +114,9 @@ func ClassifyBreakerEffect(err *types.NewAPIError) (BreakerEffectType, time.Time
 //
 // 判据只用请求级事实 + 错误形状，不依赖不可靠的 code：
 //   - 该 /v1/responses 请求原始 input 里确实带 reasoning/encrypted_content 历史；
-//   - 上游返回的是 4xx；
+//   - 上游返回的是 400（水合失败的固定形态；402/403/404 等额度、权限、路由类
+//     4xx 有各自的专属分类，绝不能被这条判据劫持——生产实测放宽到 4xx 会让
+//     同一条重试链上后续渠道的额度 403 也打出「推理水合失败」的误导日志）；
 //   - 且错误属于中继包装族（IsUpstreamRelayError，即 bad response status code 等）。
 //
 // 命中后按水合失败处理：换渠道重试并剥离密文（DecideRelayRetry 的 retry 分支已有），
@@ -126,7 +128,7 @@ func IsContextualReasoningHydration(c *gin.Context, err *types.NewAPIError) bool
 	if !common.GetContextKeyBool(c, constant.ContextKeyResponsesHadReasoning) {
 		return false
 	}
-	if err.StatusCode < 400 || err.StatusCode >= 500 {
+	if err.StatusCode != http.StatusBadRequest {
 		return false
 	}
 	return loadbalancer.IsUpstreamRelayError(err)
