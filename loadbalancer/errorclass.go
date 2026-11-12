@@ -143,6 +143,8 @@ func IsUpstreamQuotaError(err *types.NewAPIError) bool {
 		strings.Contains(msg, "insufficient_user_quota") ||
 		strings.Contains(msg, "insufficient_quota") ||
 		strings.Contains(msg, "insufficient balance") ||
+		strings.Contains(msg, "insufficient user balance") ||
+		strings.Contains(msg, "top up your user balance") ||
 		strings.Contains(msg, "exceeded your current quota") ||
 		strings.Contains(msg, "your credit balance is too low") ||
 		strings.Contains(msg, "user quota not enough") ||
@@ -156,6 +158,11 @@ func IsUpstreamQuotaError(err *types.NewAPIError) bool {
 		strings.Contains(msg, "额度已用完") ||
 		strings.Contains(msg, "额度不足") ||
 		strings.Contains(msg, "余额不足") ||
+		// 上游 new-api 家族（本网关同源）在预扣费失败时回的是这句，
+		// 2026-11-12 生产实测 #304：「预扣费额度失败, 用户剩余额度: ＄0.038174,
+		// 需要预扣费额度: ＄0.067862」。不认它就会被 any-403 的权限分类接走，
+		// 客户端看到的成因变成「渠道鉴权或分组权限异常」，与真实原因相反。
+		strings.Contains(msg, "预扣费额度失败") ||
 		strings.Contains(msg, "entitlement exhausted") ||
 		strings.Contains(msg, "reached your weekly") ||
 		strings.Contains(msg, "reached your daily") {

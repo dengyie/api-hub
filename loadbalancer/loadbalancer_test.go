@@ -570,6 +570,20 @@ func TestIsUpstreamQuotaError(t *testing.T) {
 	}
 	assert.True(t, IsUpstreamQuotaError(err3))
 
+	// 2026-11-12 生产实测的上游 new-api 家族两种写法：不认它们就会被
+	// any-403 的权限分类接走，客户端被告知「渠道鉴权或分组权限异常」。
+	err4 := &types.NewAPIError{
+		StatusCode: 403,
+		Err:        errors.New("预扣费额度失败, 用户剩余额度: ＄0.038174, 需要预扣费额度: ＄0.067862 (request id: 202611120457446502996888268d9d6uOEAqAmZ)"),
+	}
+	assert.True(t, IsUpstreamQuotaError(err4))
+
+	err5 := &types.NewAPIError{
+		StatusCode: 403,
+		Err:        errors.New("Insufficient user balance. Please top up your user balance."),
+	}
+	assert.True(t, IsUpstreamQuotaError(err5))
+
 	errNormal400 := &types.NewAPIError{
 		StatusCode: 400,
 		Err:        errors.New("invalid_request_error: max_tokens must be positive"),
