@@ -327,6 +327,26 @@ func TestReasoningHydrationErrorMessageIsSelfExplanatory(t *testing.T) {
 	assert.Contains(t, msg, raw, "原始报错要保留，便于对日志排查")
 }
 
+// TestTTFTTimeoutMessageIsActionable 首字/响应头等待超时是**网关侧**的延迟归因，
+// 不是客户端的请求或凭据问题。此前原文案把 "loadbalancer: time to first token
+// timeout" 直接透给客户端：读不出「已尝试换渠道」，也读不出该不该重试
+// （2026-11-12 生产实测：/v1/responses 的三个 500 全部是这句话）。
+func TestTTFTTimeoutMessageIsActionable(t *testing.T) {
+	err := types.NewErrorWithStatusCode(
+		&loadbalancer.TTFTTimeoutError{ChannelID: 355, TimeoutMs: 18482},
+		types.ErrorCodeChannelResponseTimeExceeded,
+		http.StatusGatewayTimeout,
+	)
+	require.True(t, loadbalancer.IsTTFTTimeout(err), "504 仍必须被 ttft_timeout 重试分支识别")
+
+	msg := clientFacingRelayMessage(err)
+	assert.Contains(t, msg, "首字超时")
+	assert.Contains(t, msg, "自动尝试切换其它渠道")
+	assert.Contains(t, msg, "不是你的请求或凭据问题")
+	assert.Contains(t, msg, "可以直接重试")
+	assert.Contains(t, msg, "time to first token timeout", "原始报错要保留，便于对日志排查")
+}
+
 // TestClientFacingRelayMessagePassesThroughOthers 确保只有这一类被改写。
 func TestClientFacingRelayMessagePassesThroughOthers(t *testing.T) {
 	err := types.NewErrorWithStatusCode(

@@ -35,6 +35,14 @@ const upstreamToolCallStateLostMessage = "工具调用续接失败：当前渠�
 const upstreamReasoningHydrationErrorMessage = "跨账号推理思考密文校验失败：多轮会话中的加密思考项与上游账号不匹配。" +
 	"网关已自动尝试剥离加密项并自愈重试，若重试耗尽仍失败，建议新建会话重新开始。"
 
+// 首字/响应头等待超时是**网关侧**的延迟归因，不是客户端请求或凭据的问题。
+// 原文案直接透出 "loadbalancer: time to first token timeout"，客户端只看到
+// 内部组件名与超时字段，既读不出「已自动换过渠道」，也无法判断该不该重试
+// （2026-11-12 生产实测：/v1/responses 的 500 全部是这句话）。这里给出结论
+// 与下一步动作，原始报错附在后面供排障转述。
+const upstreamTTFTTimeoutMessage = "网关等待上游渠道首字超时：已自动尝试切换其它渠道，但本次请求在所有可用渠道上都没能在时限内拿到首个响应字节。" +
+	"这不是你的请求或凭据问题（超长上下文、高峰时段更容易触发），可以直接重试；若持续出现请联系管理员检查上游渠道响应速度。"
+
 // 渠道账号级故障（上游渠道自己欠费 / 凭据失效 / 分组无权）在池子耗尽后绝不能
 // 原样透给客户端：用户会把它读成「我的账户余额不足」或「我的 API Key 无效」，
 // 很多 SDK 据此判定 retryable: false 直接终止。客户端要的是「网关此刻没有能服务
@@ -113,6 +121,9 @@ func clientFacingRelayMessage(newAPIError *types.NewAPIError) string {
 	}
 	if loadbalancer.IsReasoningHydrationError(newAPIError) {
 		return upstreamReasoningHydrationErrorMessage + "上游原始报错：" + newAPIError.Error()
+	}
+	if loadbalancer.IsTTFTTimeout(newAPIError) {
+		return upstreamTTFTTimeoutMessage + "上游原始报错：" + newAPIError.Error()
 	}
 	return newAPIError.Error()
 }
