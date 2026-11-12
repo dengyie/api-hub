@@ -31,9 +31,56 @@ func logBreakerAlert(c *gin.Context, channelID int, detail, effective string) {
 	case !loadbalancer.Enabled():
 		logger.LogInfo(c, detail+"，熔断未启用（策略未加载），本次失败仅记录")
 	case loadbalancer.IsBreakerExempt(channelID):
-		logger.LogInfo(c, detail+"，渠道豁免熔断（breaker_exempt），未实际冷却")
+		logger.LogInfo(c, detail+"，渠道豁免熔断（breaker_exempt），不摘出可用集")
 	default:
 		logger.LogWarn(c, detail+"，"+effective)
+	}
+}
+
+// applyExemptChannelDegrade 让 breaker_exempt 渠道的确定性故障在选路上有代价。
+//
+// 豁免渠道没有别的代价通道：TripBreaker* 对它们是空操作，IsAvailable 跳过熔断，
+// End 的阈值熔断也被跳过，于是「这条渠道已经确定坏了」对选路完全不可见，流量
+// 每次都回到同一条坏渠道（2026-11-12 生产实测：#152 累计 59 次 500、#278 累计
+// 55 次 502、#154 累计 51 次失败，全部因豁免而始终排最前）。这里按熔断分类
+// 记一个软降级窗口：确定性故障用常规冷却（默认 300s），限流用短避让（默认
+// 30s）。软降级不摘出可用集——只剩它时照常使用，与「不可失去」的豁免语义一致。
+//
+// BreakerNone（参数不支持、无特征 5xx 等）刻意不动：这些要么是请求形状问题、
+// 要么已由 End 的短窗口记录，不应升级成分钟级惩罚。
+func applyExemptChannelDegrade(c *gin.Context, channel *model.Channel, modelName string, effect service.BreakerEffectType, newAPIError *types.NewAPIError) {
+	if channel == nil || newAPIError == nil {
+		return
+	}
+	// 与 tripModelScope 同源：per_model 关闭或错误本身是渠道级时，标签与实际
+	// 写入的键都落回渠道级（空串），不能一个说模型级、一个写渠道级。
+	effective := loadbalancer.EffectiveModelName(channel.Id, modelName, newAPIError)
+	scopes := []string{effective}
+	scopes = append(scopes, loadbalancer.SiblingModelsFromMapping(channel.GetModelMapping(), modelName)...)
+
+	tracker := loadbalancer.GlobalTracker()
+	for _, scope := range scopes {
+		var window time.Duration
+		switch effect {
+		case service.BreakerRateLimit:
+			window = tracker.DegradeChannelForRateLimit(channel.Id, scope)
+		case service.BreakerQuota, service.BreakerPermission, service.BreakerRelay,
+			service.BreakerRouting, service.BreakerModelUnavailable,
+			service.BreakerEOL, service.BreakerStreamBroken, service.BreakerThinkingHistory,
+			service.BreakerCurfew, service.BreakerResponsesAPINotSupported:
+			window = tracker.DegradeChannelForFault(channel.Id, scope)
+		default:
+			return
+		}
+		if window <= 0 {
+			continue
+		}
+		label := "全部模型"
+		if scope != "" {
+			label = scope
+		}
+		logger.LogWarn(c, fmt.Sprintf("渠道 #%d [%s] 豁免熔断（breaker_exempt），改为软降级 %s：仍可用但选路排最后（%s）",
+			channel.Id, label, window, newAPIError.Error()))
 	}
 }
 
@@ -118,6 +165,12 @@ func applyUpstreamFailureEffects(c *gin.Context, channel *model.Channel, relayIn
 
 	// 智能负载：基于收敛的错误分类执行严格单次熔断
 	effect, curfewUntil := service.ClassifyBreakerEffect(newAPIError)
+	// 豁免渠道没有熔断出口，确定性故障改记软降级（仍可用、选路排最后）。
+	// 与下面的 switch 并存而非替代：TripBreaker* 对豁免渠道是空操作，
+	// 这里补上它们在选路层唯一可见的代价。
+	if loadbalancer.IsBreakerExempt(channel.Id) {
+		applyExemptChannelDegrade(c, channel, modelName, effect, newAPIError)
+	}
 	switch effect {
 	case service.BreakerRateLimit:
 		effective := scopeOf(newAPIError)

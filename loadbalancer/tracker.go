@@ -522,7 +522,15 @@ func (h *RequestHandle) End(slow, failed bool) {
 		// 首字 85s 才超时，客户端重试 11 次全部回到同一池子）。软降级只影响
 		// 排序：还有别的候选时排最后，只剩它时照常使用，与 breaker_exempt
 		// 的「不可失去」语义一致。
-		if slow {
+		//
+		// 豁免渠道的**纯硬失败**（无慢信号）同样走这里：它们连阈值熔断也被跳过
+		// （见上面的 !policy.BreakerExempt），一次失败在选路层没有任何代价，于是
+		// 同一条坏渠道会被反复选中——生产实测 2026-11-12：#152 累计 59 次 500、
+		// #278 累计 55 次 502、#154 累计 51 次失败，全部因豁免而始终排最前。
+		// 窗口只有 rate_limit_cooldown（默认 30s）：足够让紧接着的请求先试别的
+		// 渠道，又不至于把一次偶发失败长期压在末尾；确定性故障（额度/权限/中继）
+		// 由 controller 另记更长的窗口，见 DegradeChannelForFault。
+		if slow || policy.BreakerExempt {
 			h.recordSlowDegrade(policy)
 		}
 	} else if slow {
@@ -593,6 +601,53 @@ func (h *RequestHandle) recordSlowDegrade(policy ChannelPolicy) {
 		return
 	}
 	h.stats.degradedUntil.Store(until)
+}
+
+// DegradeChannelForFault 把 (渠道, 模型) 条目按常规熔断冷却窗口软降级，
+// 供 breaker_exempt 渠道的确定性故障使用（额度耗尽、权限受限、中继异常、
+// 会话路由失败、模型下线、流中断、思考历史不兼容）。
+//
+// 为什么需要它：熔断对豁免渠道是彻底的空操作——TripBreaker* 直接 return，
+// IsAvailable 也跳过熔断判断，阈值熔断同样被跳过。于是「这条渠道已经确定
+// 坏了」这件事在选路层完全不可见，同一条坏渠道每次都会重新排到最前面
+// （2026-11-12 生产实测：#152 累计 59 次 500、#278 累计 55 次 502、
+// #154 累计 51 次失败，流量始终回到它们）。软降级不是熔断：条目仍在可用集里，
+// 只剩它时照常使用（service.pickAvailable 的 degraded 兜底），与 breaker_exempt
+// 的「不可失去」语义一致。
+//
+// 返回实际写入的窗口，0 表示未写入（策略未启用 / 已有更长的降级窗口）。
+func (t *Tracker) DegradeChannelForFault(channelID int, model string) time.Duration {
+	policy := GetPolicy().Resolve(channelID)
+	cooldown := policy.Breaker.CooldownSeconds
+	if cooldown <= 0 {
+		cooldown = 300
+	}
+	return t.degrade(channelID, model, time.Duration(cooldown)*time.Second)
+}
+
+// DegradeChannelForRateLimit 把 (渠道, 模型) 条目按限流短避让窗口软降级。
+// 429/频次限制对豁免渠道同样不该被无视：短窗口足够把紧随其后的请求引开。
+func (t *Tracker) DegradeChannelForRateLimit(channelID int, model string) time.Duration {
+	cooldown := GetPolicy().Resolve(channelID).Breaker.RateLimitCooldownSeconds
+	if cooldown <= 0 {
+		cooldown = 30
+	}
+	return t.degrade(channelID, model, time.Duration(cooldown)*time.Second)
+}
+
+// degrade 只延长、不缩短已有的降级窗口：3 次慢触发的 10 分钟降级不能被
+// 一次更短的记录覆盖，否则慢渠道的隔离窗口会在下一次失败时被意外撤销。
+func (t *Tracker) degrade(channelID int, model string, window time.Duration) time.Duration {
+	if !Enabled() || channelID <= 0 || window <= 0 {
+		return 0
+	}
+	s := t.getBreaker(scopeKey(channelID, model))
+	until := time.Now().Add(window).Unix()
+	if s.degradedUntil.Load() >= until {
+		return 0
+	}
+	s.degradedUntil.Store(until)
+	return window
 }
 
 // EndCancelled 请求被下游客户端主动取消时收尾：仅释放 inflight 资源，

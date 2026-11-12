@@ -46,12 +46,15 @@ func TestTTFTTimeoutDegradesChannelEvenWhenBreakerExempt(t *testing.T) {
 		assert.True(t, ok, "软降级不得把渠道摘出可用集（breaker_exempt 的不可失去语义）: %s", reason)
 	})
 
-	t.Run("failure without slow signal does not degrade", func(t *testing.T) {
-		GlobalTracker().ResetChannelBreakers(7801)
-		h := tracker.Begin(7801, "gemini-3.8-flash")
+	t.Run("failure without slow signal does not degrade non-exempt channel", func(t *testing.T) {
+		// 非豁免渠道（7803 不在 exempt 表里）：纯失败交给熔断计数器，
+		// 不得顺带软降级。豁免渠道的纯失败会在 End 里记短窗口降级，
+		// 见 exempt_degrade_test.go。
+		GlobalTracker().ResetChannelBreakers(7803)
+		h := tracker.Begin(7803, "gemini-3.8-flash")
 		h.End(false, true)
 
-		assert.False(t, tracker.IsDegraded(7801, "gemini-3.8-flash"),
+		assert.False(t, tracker.IsDegraded(7803, "gemini-3.8-flash"),
 			"纯失败应由熔断计数器处理，不应顺带软降级")
 	})
 }

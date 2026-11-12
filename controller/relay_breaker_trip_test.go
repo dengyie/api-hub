@@ -294,6 +294,67 @@ func TestBreakerTripChainExemptChannelDoesNotClaimTrip(t *testing.T) {
 	assert.True(t, ok, "豁免渠道必须保持可用")
 }
 
+// TestExemptChannelDeterministicFaultSoftDegrades 豁免渠道的确定性故障必须
+// 转成软降级：渠道仍然可用（不摘出可用集），但选路会把它排到最后。
+// 生产证据：2026-11-12 #152/#278/#154 累计上百次硬失败，因豁免而始终排最前。
+func TestExemptChannelDeterministicFaultSoftDegrades(t *testing.T) {
+	const channelID = 7803
+	f := newBreakerTripFixture(t, channelID)
+	p := breakerTripTestPolicy()
+	p.Channels = map[int]loadbalancer.ChannelPolicy{
+		channelID: {BreakerExempt: true},
+	}
+	loadbalancer.SetPolicy(p)
+	f.captureLogs(t)
+
+	err := types.NewErrorWithStatusCode(errors.New("insufficient balance, 额度已用完"), types.ErrorCodeBadResponseBody, 403)
+	applyUpstreamFailureEffects(f.c, f.channel, f.info, f.attempt, err)
+
+	tracker := loadbalancer.GlobalTracker()
+	assert.True(t, tracker.IsDegraded(channelID, f.info.OriginModelName),
+		"豁免渠道的额度耗尽必须在选路上有代价，否则流量每次都回到这条坏渠道")
+	ok, reason := tracker.IsAvailable(channelID, f.info.OriginModelName)
+	assert.True(t, ok, "软降级不是熔断，豁免渠道不得被摘出可用集: %s", reason)
+	assert.Contains(t, f.logs.String(), "改为软降级", "实际发生的隔离必须可在日志上对账")
+	assert.NotContains(t, f.logs.String(), "已立即熔断")
+}
+
+// TestNonExemptChannelDeterministicFaultTripsInsteadOfDegrading 非豁免渠道
+// 仍走熔断（摘出可用集），不得只软降级——两条路径的后果必须可区分。
+func TestNonExemptChannelDeterministicFaultTripsInsteadOfDegrading(t *testing.T) {
+	const channelID = 7804
+	f := newBreakerTripFixture(t, channelID)
+
+	err := types.NewErrorWithStatusCode(errors.New("insufficient balance, 额度已用完"), types.ErrorCodeBadResponseBody, 403)
+	applyUpstreamFailureEffects(f.c, f.channel, f.info, f.attempt, err)
+
+	tracker := loadbalancer.GlobalTracker()
+	ok, _ := tracker.IsAvailable(channelID, f.info.OriginModelName)
+	assert.False(t, ok, "非豁免渠道的确定性故障必须熔断")
+	assert.False(t, tracker.IsDegraded(channelID, f.info.OriginModelName),
+		"熔断优先，不应同时记软降级")
+}
+
+// TestExemptChannelUnclassifiedFailureDoesNotDegrade BreakerNone（例如无特征
+// 5xx）不升级成分钟级惩罚：它没有渠道侧确定性证据，短窗口已由 End 记录。
+func TestExemptChannelUnclassifiedFailureDoesNotDegrade(t *testing.T) {
+	const channelID = 7805
+	f := newBreakerTripFixture(t, channelID)
+	p := breakerTripTestPolicy()
+	p.Channels = map[int]loadbalancer.ChannelPolicy{
+		channelID: {BreakerExempt: true},
+	}
+	loadbalancer.SetPolicy(p)
+	f.captureLogs(t)
+
+	err := types.NewErrorWithStatusCode(errors.New("internal server error"), types.ErrorCodeBadResponseStatusCode, 500)
+	applyUpstreamFailureEffects(f.c, f.channel, f.info, f.attempt, err)
+
+	assert.False(t, loadbalancer.GlobalTracker().IsDegraded(channelID, f.info.OriginModelName),
+		"无分类证据的 5xx 不得升级为确定性故障惩罚")
+	assert.NotContains(t, f.logs.String(), "改为软降级")
+}
+
 // TestBreakerTripChainDisabledPolicyDoesNotClaimTrip 策略未加载（Enabled=false）
 // 时所有 TripBreaker* 都是空操作，日志同样不得宣称已熔断。
 func TestBreakerTripChainDisabledPolicyDoesNotClaimTrip(t *testing.T) {
