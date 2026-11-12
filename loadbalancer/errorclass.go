@@ -163,6 +163,20 @@ func IsUpstreamQuotaError(err *types.NewAPIError) bool {
 		// 需要预扣费额度: ＄0.067862」。不认它就会被 any-403 的权限分类接走，
 		// 客户端看到的成因变成「渠道鉴权或分组权限异常」，与真实原因相反。
 		strings.Contains(msg, "预扣费额度失败") ||
+		// 「额度不够」的英文/中文措辞在上游侧并不统一。2026-11-12 生产同一时段
+		// 就出现了四种没被上面任何一条命中的写法，它们全部落进 any-403 的权限
+		// 分支或 relay 兜底分类——客户端看到的成因（鉴权/分组异常）与真实原因
+		// （渠道账户欠费）完全相反，渠道也没按「确定性额度失效」冷却：
+		//   「Insufficient user quota, remaining quota: ¥0.000000」
+		//   「The available quota is insufficient for this request.」
+		//   「Not enough quota to pre-consume for this request: ＄1.094442 remaining, ＄61.944000 required」
+		//   「用户账户配额已耗尽，请先充值」
+		// 上面的 hasExplicitRateLimitSignal 闸门已先行排除「额度不足 + 限流」的
+		// 混合报文，所以这里可以放心按措辞收。
+		strings.Contains(msg, "insufficient user quota") ||
+		strings.Contains(msg, "quota is insufficient") ||
+		strings.Contains(msg, "not enough quota") ||
+		strings.Contains(msg, "配额已耗尽") ||
 		strings.Contains(msg, "entitlement exhausted") ||
 		strings.Contains(msg, "reached your weekly") ||
 		strings.Contains(msg, "reached your daily") {

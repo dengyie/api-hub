@@ -584,6 +584,19 @@ func TestIsUpstreamQuotaError(t *testing.T) {
 	}
 	assert.True(t, IsUpstreamQuotaError(err5))
 
+	// 同一时段同一批上游又出现四种措辞，只是换了个说法，语义完全相同。
+	// 它们此前全部未被识别：客户端被误导成「渠道鉴权/分组权限异常」，
+	// 渠道也按 relay/permission 分类冷却，而不是「额度确定性失效」。
+	for _, msg := range []string{
+		"Insufficient user quota, remaining quota: ¥0.000000",
+		"The available quota is insufficient for this request.",
+		"Not enough quota to pre-consume for this request: ＄1.094442 remaining, ＄61.944000 required",
+		"用户账户配额已耗尽，请先充值",
+	} {
+		assert.True(t, IsUpstreamQuotaError(&types.NewAPIError{StatusCode: 403, Err: errors.New(msg)}),
+			"上游额度耗尽措辞应识别为额度错误: %s", msg)
+	}
+
 	errNormal400 := &types.NewAPIError{
 		StatusCode: 400,
 		Err:        errors.New("invalid_request_error: max_tokens must be positive"),
