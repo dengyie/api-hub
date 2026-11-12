@@ -52,6 +52,13 @@ func PrepareResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, req *d
 	}
 	adaptor.Init(info)
 
+	// 记录原始请求是否带 reasoning/encrypted_content 历史（剥离与否都记），
+	// 供错误分类在收到不透明 400 时判断是否为跨账号密文水合失败，避免误判
+	// 渠道故障（详见 constant.ContextKeyResponsesHadReasoning）。
+	if request.HasReasoningInput() {
+		common.SetContextKey(c, constant.ContextKeyResponsesHadReasoning, true)
+	}
+
 	// 当发生换渠道重试（info.RetryIndex > 0）、跨渠道漂移或显式触发自愈降级时，
 	// 自动剥离历史 reasoning / encrypted_content 项，防止跨 OpenAI 账号推理水合失败 (400)
 	originID, hasOrigin := service.GetReasoningOriginChannel(c)

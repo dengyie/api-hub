@@ -636,3 +636,49 @@ func TestDecideTaskRetry(t *testing.T) {
 	assert.Equal(t, "curfew_retry", DecideTaskRetry(c, &dto.TaskError{StatusCode: http.StatusForbidden, Message: "system_curfew"}, 3).Reason)
 	assert.Equal(t, "attempt_budget_exhausted", DecideTaskRetry(c, &dto.TaskError{StatusCode: http.StatusForbidden, Message: "system_curfew"}, 0).Reason)
 }
+
+// TestContextualReasoningHydrationOpaque400 钉住 2026-11-12 生产缺陷：
+// anyrouter（#154）把上游跨账号密文导致的 400 重新包装成完全无信息量的
+// "bad response status code 400 (request id: ...)"，code 为空。此时
+// IsReasoningHydrationError 无从识别，健康渠道被判 BreakerRelay 并软降级 5 分钟。
+// 修复判据：只要请求原始 input 里带 reasoning/encrypted_content 历史，这类不透明
+// 4xx 就按水合失败处理——换渠道重试 + 剥离密文，且不计渠道故障。
+func TestContextualReasoningHydrationOpaque400(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	newErr := func() *types.NewAPIError {
+		resp := &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Body: io.NopCloser(bytes.NewBufferString(
+				`{"error":{"message":"bad response status code 400 (request id: 20261112192231623021725EgWvoz6E)","type":"invalid_request_error","param":"","code":""}}`)),
+		}
+		return RelayErrorHandler(context.Background(), resp, false)
+	}
+
+	t.Run("没有密文历史时仍按上游中继故障计（不误豁免）", func(t *testing.T) {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		decision := EvaluateRelayFailure(c, newErr(), 2)
+		assert.Equal(t, "retry", decision.PolicyDecision.Action)
+		assert.Equal(t, "upstream_relay_error", decision.PolicyDecision.Reason)
+		assert.Equal(t, BreakerRelay, decision.BreakerEffect)
+		assert.False(t, decision.StripResponsesReasoning)
+	})
+
+	t.Run("请求带密文历史时降为水合失败：不计故障且剥离重试", func(t *testing.T) {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		common.SetContextKey(c, constant.ContextKeyResponsesHadReasoning, true)
+		decision := EvaluateRelayFailure(c, newErr(), 2)
+		assert.Equal(t, "retry", decision.PolicyDecision.Action)
+		assert.Equal(t, "reasoning_hydration_failed", decision.PolicyDecision.Reason)
+		assert.Equal(t, BreakerNone, decision.BreakerEffect)
+		assert.True(t, decision.StripResponsesReasoning)
+	})
+
+	t.Run("5xx 不套用该类豁免", func(t *testing.T) {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		common.SetContextKey(c, constant.ContextKeyResponsesHadReasoning, true)
+		err := types.NewOpenAIError(errors.New("bad response status code 502"), types.ErrorCodeBadResponseStatusCode, http.StatusBadGateway)
+		decision := EvaluateRelayFailure(c, err, 2)
+		assert.False(t, IsContextualReasoningHydration(c, err), "5xx 不属于不透明 400 水合族")
+		assert.False(t, decision.StripResponsesReasoning)
+	})
+}

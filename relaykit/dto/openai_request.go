@@ -1301,6 +1301,31 @@ func (r *OpenAIResponsesRequest) ParseInput() []MediaInput {
 	return mediaInputs
 }
 
+// HasReasoningInput reports whether the Responses input array contains any item
+// that carries account-scoped reasoning state: type "reasoning", an "rs_" id, or
+// an "encrypted_content" field. Such items can only be decrypted by the OpenAI
+// account that produced them; routing/retrying them to a different account fails
+// with a hydration 400. It is the read-only twin of StripReasoningInput.
+func (r *OpenAIResponsesRequest) HasReasoningInput() bool {
+	if r == nil || len(r.Input) == 0 || kitutil.GetJsonType(r.Input) != "array" {
+		return false
+	}
+	var rawItems []json.RawMessage
+	if err := kitutil.Unmarshal(r.Input, &rawItems); err != nil {
+		return false
+	}
+	for _, rawItem := range rawItems {
+		itemType := strings.TrimSpace(gjson.GetBytes(rawItem, "type").String())
+		itemId := strings.TrimSpace(gjson.GetBytes(rawItem, "id").String())
+		if itemType == "reasoning" ||
+			gjson.GetBytes(rawItem, "encrypted_content").Exists() ||
+			strings.HasPrefix(itemId, "rs_") {
+			return true
+		}
+	}
+	return false
+}
+
 // StripReasoningInput removes items of type "reasoning", items with id prefix "rs_",
 // or items containing "encrypted_content" from the Responses API input array.
 // Returns true if any items were stripped.

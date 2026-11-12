@@ -99,4 +99,12 @@ const (
 	// ContextKeyStripResponsesReasoning instructs PrepareResponsesRequest to strip foreign
 	// reasoning/encrypted_content items from the responses input payload before sending upstream.
 	ContextKeyStripResponsesReasoning ContextKey = "strip_responses_reasoning"
+
+	// ContextKeyResponsesHadReasoning 记录本次 /v1/responses 出站请求体原本带有
+	// reasoning / encrypted_content 历史项（可能是跨账号密文，无法被别的上游解密）。
+	// 与 ContextKeyStripResponsesReasoning 的区别：后者是「要剥离」的动作标记，
+	// 本键是「原始请求长这样」的事实，剥离前后都成立，供错误分类判定：当这类请求
+	// 被上游以不透明的 400「bad response status code」打回时，根因几乎一定是跨账号
+	// 密文水合失败，不应据此把渠道判为上游中继故障并软降级。
+	ContextKeyResponsesHadReasoning ContextKey = "responses_had_reasoning"
 )

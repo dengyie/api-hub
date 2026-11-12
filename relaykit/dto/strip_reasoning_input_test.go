@@ -108,3 +108,28 @@ func TestEnsureCodexFields(t *testing.T) {
 		assert.JSONEq(t, `["reasoning.encrypted_content"]`, string(req.Include))
 	})
 }
+
+func TestHasReasoningInput(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{"reasoning type", `[{"role":"user","content":"hi"},{"type":"reasoning","id":"rs_1"}]`, true},
+		{"encrypted_content without type", `[{"role":"user","content":"hi"},{"type":"custom","encrypted_content":"gAAAA"}]`, true},
+		{"rs_ id prefix", `[{"role":"user","content":"hi"},{"id":"rs_123"}]`, true},
+		{"plain conversation", `[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"}]`, false},
+		{"string input", `"just a string"`, false},
+		{"empty", ``, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &OpenAIResponsesRequest{Input: json.RawMessage(tc.input)}
+			assert.Equal(t, tc.want, req.HasReasoningInput())
+			// 只读：不得改动 input。
+			assert.Equal(t, tc.input, string(req.Input))
+		})
+	}
+	var nilReq *OpenAIResponsesRequest
+	assert.False(t, nilReq.HasReasoningInput())
+}

@@ -101,6 +101,37 @@ func ClassifyBreakerEffect(err *types.NewAPIError) (BreakerEffectType, time.Time
 	return BreakerNone, time.Time{}
 }
 
+// IsContextualReasoningHydration 判断一次失败是否属于「请求本身带着跨账号
+// reasoning/encrypted_content 历史，上游因无法解密而以不透明 400 打回」的水合失败族。
+//
+// 为什么需要这条额外判据：像 anyrouter 这类 new-api 中转站，其上游对跨账号密文
+// 返回的 400 会被它自己再包一层 —— message 变成完全无信息量的
+// "bad response status code 400 (request id: ...)"，code 可能是空串或
+// bad_response_status_code，`invalid_encrypted_content` 这个唯一可靠信号就此丢失
+// （实测：对 anyrouter 直接回放外账号密文，它有时干脆 520 断流）。IsReasoningHydrationError
+// 对这种被抹掉 code 的包装无能为力，于是健康渠道被误判为「上游中继代理异常」并
+// 软降级 5 分钟。
+//
+// 判据只用请求级事实 + 错误形状，不依赖不可靠的 code：
+//   - 该 /v1/responses 请求原始 input 里确实带 reasoning/encrypted_content 历史；
+//   - 上游返回的是 4xx；
+//   - 且错误属于中继包装族（IsUpstreamRelayError，即 bad response status code 等）。
+//
+// 命中后按水合失败处理：换渠道重试并剥离密文（DecideRelayRetry 的 retry 分支已有），
+// 且不计渠道故障（EvaluateRelayFailure / relay_breaker 会把 BreakerRelay 降为 None）。
+func IsContextualReasoningHydration(c *gin.Context, err *types.NewAPIError) bool {
+	if c == nil || err == nil {
+		return false
+	}
+	if !common.GetContextKeyBool(c, constant.ContextKeyResponsesHadReasoning) {
+		return false
+	}
+	if err.StatusCode < 400 || err.StatusCode >= 500 {
+		return false
+	}
+	return loadbalancer.IsUpstreamRelayError(err)
+}
+
 // EvaluateRelayFailure 执行单次评定、多维输出的完整容灾评定。
 func EvaluateRelayFailure(c *gin.Context, err *types.NewAPIError, retryTimes int) FailureDecision {
 	decision := FailureDecision{
@@ -112,6 +143,13 @@ func EvaluateRelayFailure(c *gin.Context, err *types.NewAPIError, retryTimes int
 	}
 
 	decision.BreakerEffect, decision.CurfewUntil = ClassifyBreakerEffect(err)
+	// 不透明 400 水合失败：请求带跨账号密文历史，但中转站把上游 400 重新包装成
+	// "bad response status code 400"（code 被抹掉/为空），IsReasoningHydrationError
+	// 认不出，会误落 BreakerRelay。这里按请求事实把它降为「不计渠道故障」。
+	if decision.BreakerEffect == BreakerRelay && IsContextualReasoningHydration(c, err) {
+		decision.BreakerEffect = BreakerNone
+		decision.CurfewUntil = time.Time{}
+	}
 
 	if param, ok := loadbalancer.IsParamNotSupportedError(err); ok {
 		decision.LearnedParam = param
@@ -119,7 +157,7 @@ func EvaluateRelayFailure(c *gin.Context, err *types.NewAPIError, retryTimes int
 	if limit, ok := loadbalancer.ParseMaxCompletionTokensLimit(err); ok {
 		decision.LearnedLimit = limit
 	}
-	if loadbalancer.IsReasoningHydrationError(err) {
+	if loadbalancer.IsReasoningHydrationError(err) || IsContextualReasoningHydration(c, err) {
 		decision.StripResponsesReasoning = true
 	}
 
@@ -295,6 +333,12 @@ func DecideRelayRetry(c *gin.Context, err *types.NewAPIError, retryTimes int) Po
 	if loadbalancer.IsReasoningHydrationError(err) {
 		return PolicyDecision{Action: "retry", Reason: "reasoning_hydration_failed", Source: "loadbalancer"}
 	}
+	// 不透明 400 水合失败（中转站抹掉了 code）：同属水合族，换渠道重试并剥离密文，
+	// 不能因 message 只剩 "bad response status code 400" 就被下面的中继包装分支
+	// 当成普通上游中继故障（见 IsContextualReasoningHydration 注释）。
+	if IsContextualReasoningHydration(c, err) {
+		return PolicyDecision{Action: "retry", Reason: "reasoning_hydration_failed", Source: "loadbalancer"}
+	}
 	if loadbalancer.IsCodexValidationBadRequest(err) {
 		return PolicyDecision{Action: "retry", Reason: "codex_validation_error", Source: "loadbalancer"}
 	}
@@ -416,7 +460,7 @@ func ProcessChannelError(c *gin.Context, channelError types.ChannelError, err *t
 			loadbalancer.RecordMaxCompletionTokensLimit(channelError.ChannelId, relayInfo.UpstreamModelName, limit)
 		}
 	}
-	logger.LogError(c, fmt.Sprintf("channel error (channel #%d, status code: %d): %s", channelError.ChannelId, err.StatusCode, common.LocalLogPreview(err.MaskSensitiveErrorWithStatusCode())))
+	logger.LogError(c, fmt.Sprintf("channel error (channel #%d, status code: %d, code: %s): %s", channelError.ChannelId, err.StatusCode, err.GetErrorCode(), common.LocalLogPreview(err.MaskSensitiveErrorWithStatusCode())))
 	// 佐证计数只在这一处发生，四条禁用路径全部汇流到 ProcessChannelError。
 	// 换到任何一处调用点去计数都会被重复触发：relay 路径上同一次失败先被
 	// RecordPolicyFailure 判一次（那次不计数，见 ShouldDisableChannel 的注释），

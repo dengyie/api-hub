@@ -165,6 +165,12 @@ func applyUpstreamFailureEffects(c *gin.Context, channel *model.Channel, relayIn
 
 	// 智能负载：基于收敛的错误分类执行严格单次熔断
 	effect, curfewUntil := service.ClassifyBreakerEffect(newAPIError)
+	// 不透明 400 水合失败（中转站抹掉 code、只留 "bad response status code 400"）：
+	// 请求本身带跨账号密文历史，根因不在渠道，降为不计故障，避免健康渠道被软降级。
+	if effect == service.BreakerRelay && service.IsContextualReasoningHydration(c, newAPIError) {
+		effect = service.BreakerNone
+		curfewUntil = time.Time{}
+	}
 	// 豁免渠道没有熔断出口，确定性故障改记软降级（仍可用、选路排最后）。
 	// 与下面的 switch 并存而非替代：TripBreaker* 对豁免渠道是空操作，
 	// 这里补上它们在选路层唯一可见的代价。
