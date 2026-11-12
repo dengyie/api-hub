@@ -198,6 +198,10 @@ func TestGeneralOpenAIRequestGetSystemRoleName(t *testing.T) {
 		{name: "gpt 5.6 uses developer", model: "gpt-5.6-luna", want: "developer"},
 		{name: "gpt 6 uses developer", model: "gpt-6-astra", want: "developer"},
 		{name: "gpt 6 snapshot uses developer", model: "gpt-6-astra-2026-09-03", want: "developer"},
+		{name: "gpt 6.1 sol uses developer", model: "gpt-6.1-sol", want: "developer"},
+		{name: "gpt 6.1 sol snapshot uses developer", model: "gpt-6.1-sol-2026-11-12", want: "developer"},
+		{name: "gpt 6.1 terra uses developer", model: "gpt-6.1-terra", want: "developer"},
+		{name: "unknown gpt 6.1 variant stays system", model: "gpt-6.1-sol-pro", want: "system"},
 		{name: "unknown gpt 6 variant stays system", model: "gpt-6-astra-pro", want: "system"},
 		{name: "invalid gpt 6 snapshot stays system", model: "gpt-6-astra-2026-99-03", want: "system"},
 		{name: "unknown generation stays system", model: "gpt-7", want: "system"},
@@ -324,6 +328,34 @@ func TestSGLangRequestExtensionsRoundTrip(t *testing.T) {
 			encoded, err := kitutil.Marshal(tc.request)
 			require.NoError(t, err)
 			assert.JSONEq(t, tc.raw, string(encoded))
+		})
+	}
+}
+
+func TestGetOpenAIChatCapabilitiesForGPT6PointReleases(t *testing.T) {
+	tests := []struct {
+		name            string
+		model           string
+		reasoningEffort string
+		wantMaxTokens   bool
+		wantDeveloper   bool
+		wantSampling    bool
+	}{
+		{name: "gpt 6.1 sol keeps sampling without reasoning", model: "gpt-6.1-sol", reasoningEffort: "", wantMaxTokens: true, wantDeveloper: true, wantSampling: true},
+		{name: "gpt 6.1 sol strips sampling with reasoning", model: "gpt-6.1-sol", reasoningEffort: "high", wantMaxTokens: true, wantDeveloper: true, wantSampling: false},
+		{name: "gpt 6.1 sol snapshot is recognized", model: "gpt-6.1-sol-2026-11-12", reasoningEffort: "none", wantMaxTokens: true, wantDeveloper: true, wantSampling: true},
+		{name: "gpt 6.1 terra is recognized conservatively", model: "gpt-6.1-terra", reasoningEffort: "", wantMaxTokens: true, wantDeveloper: true, wantSampling: false},
+		{name: "gpt 6.1 astra never samples", model: "gpt-6.1-astra", reasoningEffort: "none", wantMaxTokens: true, wantDeveloper: true, wantSampling: false},
+		{name: "unknown gpt 6.1 variant keeps defaults", model: "gpt-6.1-sol-pro", reasoningEffort: "none", wantMaxTokens: false, wantDeveloper: false, wantSampling: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := GetOpenAIChatCapabilities(tt.model, tt.reasoningEffort)
+			assert.Equal(t, tt.wantMaxTokens, got.UseMaxCompletionTokens)
+			assert.Equal(t, tt.wantDeveloper, got.UseDeveloperRole)
+			assert.Equal(t, tt.wantSampling, got.SupportsTemperature)
+			assert.Equal(t, tt.wantSampling, got.SupportsTopP)
+			assert.Equal(t, tt.wantSampling, got.SupportsLogProbs)
 		})
 	}
 }

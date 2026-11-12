@@ -331,8 +331,8 @@ func GetOpenAIChatCapabilities(modelName, reasoningEffort string) OpenAIChatCapa
 	}
 
 	isGPT5Model := IsOpenAIGPT5Model(modelName)
-	isGPT6SolLuna := isOpenAIModelSnapshot(modelName, "gpt-6-sol") || isOpenAIModelSnapshot(modelName, "gpt-6-luna")
-	if !isGPT5Model && !isGPT6SolLuna && !isOpenAIModelSnapshot(modelName, "gpt-6-astra") {
+	isGPT6SolLuna := isOpenAIGPT6SolLunaModel(modelName)
+	if !isGPT5Model && !isGPT6SolLuna && !isOpenAIGPT6NonSamplingModel(modelName) {
 		return capabilities
 	}
 	capabilities.UseMaxCompletionTokens = true
@@ -340,8 +340,9 @@ func GetOpenAIChatCapabilities(modelName, reasoningEffort string) OpenAIChatCapa
 
 	// These standard GPT-5 models default to none and support sampling only
 	// without reasoning. Named variants (pro, codex, chat-latest, etc.) do not
-	// inherit this exception. GPT-6 Sol and Luna follow the same rule. GPT-6
-	// Astra never supports these parameters.
+	// inherit this exception. GPT-6 Sol and Luna, including their 6.1 point
+	// releases, follow the same rule. GPT-6 Astra and Terra never support these
+	// parameters.
 	// https://developers.openai.com/api/docs/guides/latest-model?model=gpt-5.2
 	// https://developers.openai.com/api/docs/guides/latest-model?model=gpt-5.4
 	// https://developers.openai.com/api/docs/guides/latest-model?model=gpt-6-astra
@@ -372,6 +373,36 @@ func isOpenAIModelSnapshot(modelName, baseModel string) bool {
 	}
 	_, err := time.Parse(time.DateOnly, snapshot)
 	return err == nil
+}
+
+// GPT-6 point releases (gpt-6.1, ...) are enumerated per family instead of
+// prefix-matched: "gpt-6.1-" is not a prefix of "gpt-6-", and a bare "gpt-6-"
+// prefix would also swallow unrelated variants such as gpt-6-astra-pro that
+// intentionally fall back to the unrecognized-model defaults. Dated snapshots
+// (base-YYYY-MM-DD) are accepted by isOpenAIModelSnapshot.
+var gpt6SolLunaFamilies = []string{"gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-luna"}
+
+// gpt6NonSamplingFamilies are GPT-6 models that get the GPT-6 request shaping
+// (developer role, max_completion_tokens) but never keep sampling parameters,
+// either because they refuse them (Astra) or because that has not been
+// confirmed for the current generation (Terra).
+var gpt6NonSamplingFamilies = []string{"gpt-6-astra", "gpt-6.1-astra", "gpt-6.1-terra"}
+
+func isOpenAIGPT6SolLunaModel(modelName string) bool {
+	return isAnyOpenAIModelSnapshot(modelName, gpt6SolLunaFamilies)
+}
+
+func isOpenAIGPT6NonSamplingModel(modelName string) bool {
+	return isAnyOpenAIModelSnapshot(modelName, gpt6NonSamplingFamilies)
+}
+
+func isAnyOpenAIModelSnapshot(modelName string, baseModels []string) bool {
+	for _, baseModel := range baseModels {
+		if isOpenAIModelSnapshot(modelName, baseModel) {
+			return true
+		}
+	}
+	return false
 }
 
 func IsQwenThinkingBudgetModel(modelName string) bool {
