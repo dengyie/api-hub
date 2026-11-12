@@ -269,3 +269,46 @@ func TestBreakerNonHardFailureDoesNotResetBreakerCounters(t *testing.T) {
 	assert.False(t, ok, "累积 3 次硬失败后渠道必须熔断，中间的 400 绝不能洗白此前累积的 2 次失败")
 	assert.Equal(t, loadbalancer.ReasonCircuitOpen, reason)
 }
+
+// TestBreakerTripChainExemptChannelDoesNotClaimTrip 钉住日志与熔断状态机的一致
+// 性：breaker_exempt 渠道（Codex 代理池 / 本机 CPA 兜底）的 TripBreaker* 是
+// 空操作，日志绝不能再宣称「已立即熔断」。否则排障会照着不存在的冷却窗口
+// 解释流量——2026-11 生产中 #152/#154 持续出现该 WARN，而它们从未被冷却。
+func TestBreakerTripChainExemptChannelDoesNotClaimTrip(t *testing.T) {
+	const channelID = 7801
+	f := newBreakerTripFixture(t, channelID)
+	p := breakerTripTestPolicy()
+	p.Channels = map[int]loadbalancer.ChannelPolicy{
+		channelID: {BreakerExempt: true},
+	}
+	loadbalancer.SetPolicy(p)
+	f.captureLogs(t)
+
+	err := types.NewErrorWithStatusCode(errors.New("来自上游渠道的报错: bad response status code 400"), types.ErrorCodeBadResponseBody, 400)
+	applyUpstreamFailureEffects(f.c, f.channel, f.info, f.attempt, err)
+
+	assert.NotContains(t, f.logs.String(), "已立即熔断", "豁免渠道未发生状态变化，日志不得声称已熔断")
+	assert.Contains(t, f.logs.String(), "breaker_exempt", "日志必须写明豁免原因，排障才能区分「没熔」与「熔了」")
+	assert.Contains(t, f.logs.String(), "上游中继代理异常", "分类日志仍要保留，豁免只影响结论不影响归因")
+	ok, _ := loadbalancer.GlobalTracker().IsAvailable(channelID, f.info.OriginModelName)
+	assert.True(t, ok, "豁免渠道必须保持可用")
+}
+
+// TestBreakerTripChainDisabledPolicyDoesNotClaimTrip 策略未加载（Enabled=false）
+// 时所有 TripBreaker* 都是空操作，日志同样不得宣称已熔断。
+func TestBreakerTripChainDisabledPolicyDoesNotClaimTrip(t *testing.T) {
+	const channelID = 7802
+	f := newBreakerTripFixture(t, channelID)
+	p := breakerTripTestPolicy()
+	p.Enabled = false
+	loadbalancer.SetPolicy(p)
+	f.captureLogs(t)
+
+	err := types.NewErrorWithStatusCode(errors.New("insufficient balance, 额度已用完"), types.ErrorCodeBadResponseBody, 400)
+	applyUpstreamFailureEffects(f.c, f.channel, f.info, f.attempt, err)
+
+	assert.NotContains(t, f.logs.String(), "已立即熔断")
+	assert.Contains(t, f.logs.String(), "熔断未启用", "降级态必须在日志里显式可见")
+	ok, _ := loadbalancer.GlobalTracker().IsAvailable(channelID, f.info.OriginModelName)
+	assert.True(t, ok, "策略未启用时不得有任何隔离")
+}

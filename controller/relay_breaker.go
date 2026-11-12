@@ -17,6 +17,26 @@ func processChannelError(c *gin.Context, channelError types.ChannelError, err *t
 	service.ProcessChannelError(c, channelError, err, relayInfo)
 }
 
+// logBreakerAlert 记录一次「判定需要熔断」的上游失败。detail 只描述成因，
+// 结论由熔断状态机是否真正动作决定：生效时打 WARN 并追加 effective；渠道
+// 豁免（breaker_exempt）或策略未加载时 TripBreaker* 是空操作，降级为 INFO
+// 并写明未实际冷却。
+//
+// 不能无条件打「已立即熔断」：豁免是刻意配置（本机 CPA、Codex 代理池这类
+// 不可失去的通道），生产日志里它们每次失败都打「已立即熔断」，实际却从未
+// 冷却过——排障会照着不存在的隔离窗口解释流量（2026-11 实测：#152/#154
+// 在 20 分钟内出现 30 次「已立即熔断」，而两者始终照常接流量）。
+func logBreakerAlert(c *gin.Context, channelID int, detail, effective string) {
+	switch {
+	case !loadbalancer.Enabled():
+		logger.LogInfo(c, detail+"，熔断未启用（策略未加载），本次失败仅记录")
+	case loadbalancer.IsBreakerExempt(channelID):
+		logger.LogInfo(c, detail+"，渠道豁免熔断（breaker_exempt），未实际冷却")
+	default:
+		logger.LogWarn(c, detail+"，"+effective)
+	}
+}
+
 // applyUpstreamFailureEffects 在一轮尝试失败后，把这次失效记到正确的熔断
 // 作用域上。熔断（本函数）与自动禁用（processChannelError）在此分流：熔断
 // 可逆、按 (渠道, 模型) 粒度快速绕开；账号级整体下线由 AutomaticDisable
@@ -89,7 +109,9 @@ func applyUpstreamFailureEffects(c *gin.Context, channel *model.Channel, relayIn
 		}
 		for _, sibling := range loadbalancer.SiblingModelsFromMapping(channel.GetModelMapping(), modelName) {
 			trip(sibling)
-			logger.LogWarn(c, fmt.Sprintf("渠道 #%d [%s] 与 %s 映射到同一上游模型，一并熔断", channel.Id, scopeLabel(sibling), modelName))
+			logBreakerAlert(c, channel.Id,
+				fmt.Sprintf("渠道 #%d [%s] 与 %s 映射到同一上游模型", channel.Id, scopeLabel(sibling), modelName),
+				"一并熔断")
 		}
 		return effective
 	}
@@ -100,43 +122,67 @@ func applyUpstreamFailureEffects(c *gin.Context, channel *model.Channel, relayIn
 	case service.BreakerRateLimit:
 		effective := scopeOf(newAPIError)
 		loadbalancer.GlobalTracker().TripBreakerForRateLimit(channel.Id, effective)
-		logger.LogWarn(c, fmt.Sprintf("渠道 #%d [%s] 上游限流/并发超限 (429/RPM/Concurrency)，已设置短期避让冷却: %s", channel.Id, scopeLabel(effective), newAPIError.Error()))
+		logBreakerAlert(c, channel.Id,
+			fmt.Sprintf("渠道 #%d [%s] 上游限流/并发超限 (429/RPM/Concurrency)", channel.Id, scopeLabel(effective)),
+			"已设置短期避让冷却: "+newAPIError.Error())
 		for _, sibling := range loadbalancer.SiblingModelsFromMapping(channel.GetModelMapping(), modelName) {
 			loadbalancer.GlobalTracker().TripBreakerForRateLimit(channel.Id, sibling)
-			logger.LogWarn(c, fmt.Sprintf("渠道 #%d [%s] 与 %s 映射到同一上游模型，一并避让", channel.Id, scopeLabel(sibling), modelName))
+			logBreakerAlert(c, channel.Id,
+				fmt.Sprintf("渠道 #%d [%s] 与 %s 映射到同一上游模型", channel.Id, scopeLabel(sibling), modelName),
+				"一并避让")
 		}
 	case service.BreakerCurfew:
 		tripped := tripModelScope(newAPIError, curfewUntil)
-		logger.LogWarn(c, fmt.Sprintf("渠道 #%d [%s] 宵禁中，已熔断到 %s", channel.Id, scopeLabel(tripped), curfewUntil.Format("15:04")))
+		logBreakerAlert(c, channel.Id,
+			fmt.Sprintf("渠道 #%d [%s] 宵禁中", channel.Id, scopeLabel(tripped)),
+			"已熔断到 "+curfewUntil.Format("15:04"))
 	case service.BreakerEOL:
 		tripped := tripModelScope(newAPIError, time.Time{})
-		logger.LogWarn(c, fmt.Sprintf("渠道 #%d [%s] 上游模型已 EOL/下线 (410)，已立即熔断", channel.Id, scopeLabel(tripped)))
+		logBreakerAlert(c, channel.Id,
+			fmt.Sprintf("渠道 #%d [%s] 上游模型已 EOL/下线 (410)", channel.Id, scopeLabel(tripped)),
+			"已立即熔断")
 	case service.BreakerStreamBroken:
 		tripped := tripModelScope(newAPIError, time.Time{})
-		logger.LogWarn(c, fmt.Sprintf("渠道 #%d [%s] 上游流传输中断 (%s)，已立即熔断并触发重试", channel.Id, scopeLabel(tripped), newAPIError.Error()))
+		logBreakerAlert(c, channel.Id,
+			fmt.Sprintf("渠道 #%d [%s] 上游流传输中断 (%s)", channel.Id, scopeLabel(tripped), newAPIError.Error()),
+			"已立即熔断并触发重试")
 	case service.BreakerQuota:
 		tripped := tripModelScope(newAPIError, time.Time{})
-		logger.LogWarn(c, fmt.Sprintf("渠道 #%d [%s] 上游额度已耗尽，已立即熔断: %s", channel.Id, scopeLabel(tripped), newAPIError.Error()))
+		logBreakerAlert(c, channel.Id,
+			fmt.Sprintf("渠道 #%d [%s] 上游额度已耗尽", channel.Id, scopeLabel(tripped)),
+			"已立即熔断: "+newAPIError.Error())
 	case service.BreakerRouting:
 		tripped := tripModelScope(newAPIError, time.Time{})
-		logger.LogWarn(c, fmt.Sprintf("渠道 #%d [%s] 上游会话路由失败 (缺失 x-opencode-session)，已立即熔断该渠道: %s", channel.Id, scopeLabel(tripped), newAPIError.Error()))
+		logBreakerAlert(c, channel.Id,
+			fmt.Sprintf("渠道 #%d [%s] 上游会话路由失败 (缺失 x-opencode-session)", channel.Id, scopeLabel(tripped)),
+			"已立即熔断该渠道: "+newAPIError.Error())
 	case service.BreakerThinkingHistory:
 		tripped := tripModelScope(newAPIError, time.Time{})
-		logger.LogWarn(c, fmt.Sprintf("渠道 #%d [%s] 上游思考模式历史消息不兼容 (reasoning_content must be passed back)，已立即熔断: %s", channel.Id, scopeLabel(tripped), newAPIError.Error()))
+		logBreakerAlert(c, channel.Id,
+			fmt.Sprintf("渠道 #%d [%s] 上游思考模式历史消息不兼容 (reasoning_content must be passed back)", channel.Id, scopeLabel(tripped)),
+			"已立即熔断: "+newAPIError.Error())
 	case service.BreakerModelUnavailable:
 		tripped := tripModelScope(newAPIError, time.Time{})
-		logger.LogWarn(c, fmt.Sprintf("渠道 #%d [%s] 上游模型不可用/已禁用，已立即熔断: %s", channel.Id, scopeLabel(tripped), newAPIError.Error()))
+		logBreakerAlert(c, channel.Id,
+			fmt.Sprintf("渠道 #%d [%s] 上游模型不可用/已禁用", channel.Id, scopeLabel(tripped)),
+			"已立即熔断: "+newAPIError.Error())
 	case service.BreakerResponsesAPINotSupported:
 		// Responses API 不被该上游支持：模型在、协议不在。按 (渠道, 模型) 冷却，
 		// 其余模型照常；既非「模型不存在」（不得进自动禁用），也非渠道故障。
 		tripped := tripModelScope(newAPIError, time.Time{})
-		logger.LogWarn(c, fmt.Sprintf("渠道 #%d [%s] 上游不支持 Responses API (api_not_supported)，已按模型冷却: %s", channel.Id, scopeLabel(tripped), newAPIError.Error()))
+		logBreakerAlert(c, channel.Id,
+			fmt.Sprintf("渠道 #%d [%s] 上游不支持 Responses API (api_not_supported)", channel.Id, scopeLabel(tripped)),
+			"已按模型冷却: "+newAPIError.Error())
 	case service.BreakerPermission:
 		tripped := tripModelScope(newAPIError, time.Time{})
-		logger.LogWarn(c, fmt.Sprintf("渠道 #%d [%s] 上游权限受限/分组无权访问/模型不支持，已立即熔断: %s", channel.Id, scopeLabel(tripped), newAPIError.Error()))
+		logBreakerAlert(c, channel.Id,
+			fmt.Sprintf("渠道 #%d [%s] 上游权限受限/分组无权访问/模型不支持", channel.Id, scopeLabel(tripped)),
+			"已立即熔断: "+newAPIError.Error())
 	case service.BreakerRelay:
 		tripped := tripModelScope(newAPIError, time.Time{})
-		logger.LogWarn(c, fmt.Sprintf("渠道 #%d [%s] 上游中继代理异常 (bad response status code / 渠道出错)，已立即熔断: %s", channel.Id, scopeLabel(tripped), newAPIError.Error()))
+		logBreakerAlert(c, channel.Id,
+			fmt.Sprintf("渠道 #%d [%s] 上游中继代理异常 (bad response status code / 渠道出错)", channel.Id, scopeLabel(tripped)),
+			"已立即熔断: "+newAPIError.Error())
 	case service.BreakerNone:
 	}
 }
