@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -690,4 +691,23 @@ func TestCodexProbeRequestShape(t *testing.T) {
 	assert.True(t, *respReq.Stream)
 	assert.Equal(t, string(respReq.Store), "false", "Codex endpoint requires store: false")
 	assert.Contains(t, string(respReq.Include), "reasoning.encrypted_content", "Codex endpoint requires encrypted reasoning in include")
+}
+
+// 用户定制：渠道测试 UA 按模型名分流（claude→claude UA，其余→codex UA），
+// 且两个分支的版本段随指纹同步状态变化（service.Active*FingerprintVersion）。
+// 同步状态本身的空/非空语义在 service 包测试覆盖，这里只锁分流与默认回退格式。
+func TestChannelTestUserAgentSelection(t *testing.T) {
+	if got := channelTestUserAgent("claude-sonnet-4"); !strings.HasPrefix(got, "claude-code/") {
+		t.Fatalf("claude model must use claude-code UA, got %q", got)
+	}
+	if got := channelTestUserAgent("gpt-5.5"); !strings.HasPrefix(got, "codex-cli/") {
+		t.Fatalf("gpt model must use codex-cli UA, got %q", got)
+	}
+	if got := channelTestUserAgent("gemini-3-pro"); !strings.HasPrefix(got, "codex-cli/") {
+		t.Fatalf("other models must use codex-cli UA, got %q", got)
+	}
+	// 回退默认值格式（未同步成功时的编译期兜底）
+	if got := channelTestUserAgent("gpt-5.5"); got == "codex-cli/" {
+		t.Fatalf("codex UA must not be empty versioned, got %q", got)
+	}
 }

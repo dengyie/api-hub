@@ -204,6 +204,11 @@ func main() {
 	// Codex credential auto-refresh check every 10 minutes, refresh when expires within 1 day
 	service.StartCodexCredentialAutoRefreshTask()
 
+	// Sync Codex / Claude Code disguise fingerprint UA versions against the
+	// official release feeds (hourly; read-only GETs + process-local state,
+	// runs on every node)
+	service.StartClientFingerprintSyncTask()
+
 	// Subscription quota reset task (daily/weekly/monthly/custom)
 	service.StartSubscriptionQuotaResetTask()
 

@@ -43,17 +43,33 @@ type testResult struct {
 
 // 用户定制：渠道测试请求的 UA
 // 部分上游（如 nailao）会按 User-Agent 拦截，Python-urllib 等默认 UA 直接 403，
-// 因此测试时统一模拟真实客户端 UA
+// 因此测试时统一模拟真实客户端 UA。版本号优先取同步好的线上官方发版
+// （service.Active*FingerprintVersion），同步未成功时回退编译期默认——
+// 渠道测试与真实转发走同一批版本门禁上游，过旧的版本号同样会被拒。
 const (
 	// 模拟 Codex CLI（gpt 类型 + 默认）
-	channelTestCodexUserAgent = "codex-cli/0.44.0"
+	channelTestCodexUserAgentDefault = "codex-cli/0.44.0"
 	// 模拟 Claude Code（claude 模型）
-	channelTestClaudeUserAgent = "claude-code/2.0.0"
+	channelTestClaudeUserAgentDefault = "claude-code/2.0.0"
 	// gin 上下文中传递测试 UA 的 key
 	channelTestUserAgentKey = "channel_test_user_agent"
 	// gin 上下文中传递是否为 Codex 测试渠道的 key
 	channelTestIsCodexKey = "channel_test_is_codex"
 )
+
+func channelTestCodexUserAgent() string {
+	if v := service.ActiveCodexFingerprintVersion(); v != "" {
+		return "codex-cli/" + v
+	}
+	return channelTestCodexUserAgentDefault
+}
+
+func channelTestClaudeUserAgent() string {
+	if v := service.ActiveClaudeFingerprintVersion(); v != "" {
+		return "claude-code/" + v
+	}
+	return channelTestClaudeUserAgentDefault
+}
 
 // isCodexChannel 判断渠道是否为 Codex 渠道（包含官方 Codex 渠道以及类似 zzzcoding 的反代渠道）
 func isCodexChannel(channel *model.Channel) bool {
@@ -121,9 +137,9 @@ func autoDetectChannelTestEndpoint(testModel string, endpointType string) string
 // 用户定制：根据模型名选择测试请求 UA
 func channelTestUserAgent(testModel string) string {
 	if strings.Contains(strings.ToLower(testModel), "claude") {
-		return channelTestClaudeUserAgent
+		return channelTestClaudeUserAgent()
 	}
-	return channelTestCodexUserAgent
+	return channelTestCodexUserAgent()
 }
 
 func normalizeChannelTestEndpoint(channel *model.Channel, endpointType string) string {

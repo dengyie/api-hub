@@ -10,6 +10,7 @@ import (
 	"github.com/dengyie/apihub/relay/common"
 	"github.com/dengyie/apihub/relaykit/dto"
 	"github.com/dengyie/apihub/relaykit/types"
+	"github.com/dengyie/apihub/service"
 	"github.com/dengyie/apihub/setting/operation_setting"
 
 	"github.com/gin-gonic/gin"
@@ -21,7 +22,8 @@ import (
 // 其余客户端补一套默认 Codex 指纹，避免 Go 默认 UA 等非 Codex 特征外泄。
 const (
 	codexFingerprintOriginator = "codex_cli_rs"
-	codexFingerprintUserAgent  = "codex_cli_rs/0.77.0 (Mac OS 26.1.0; arm64) iTerm.app/3.6.5"
+	// UA 不在此处写死：service.ActiveCodexFingerprintUA() 动态提供（后台任务
+	// 对齐官方发版，未同步成功时回退编译期默认 0.77.0）。
 	codexFingerprintOpenAIBeta = "responses=experimental"
 	// 部分上游（如 zzzcoding）缺这个头就以 403 "only allows Codex official clients" 拒绝。
 	codexFingerprintBetaFeatures = "remote_compaction_v2"
@@ -29,10 +31,11 @@ const (
 
 // 用户定制：claude 协议上游（Anthropic 原生渠道与 coding-plan 特殊 base）的请求，
 // 上游必须始终看到 Claude Code CLI 形态，不论下游客户端是什么。真 Claude Code 客户端
-// 透传其指纹头；其余客户端补一套默认指纹。头集合与版本对齐知识库
-// [[Claude 客户端协议伪装与指纹规范]]（CLI 2.1.284 + Stainless SDK 0.39.0），版本升级只改这里。
+// 透传其指纹头；其余客户端补一套默认指纹。头集合与静态版本对齐知识库
+// [[Claude 客户端协议伪装与指纹规范]]（Stainless SDK 0.39.0 为独立版本列车，
+// 不随 CLI 发版变化）；UA 由 service.ActiveClaudeFingerprintUA() 动态提供，
+// 本文件不含任何版本号。
 const (
-	claudeFingerprintUserAgent           = "claude-code/2.1.284 (Darwin 24.6.0; arm64)"
 	claudeFingerprintClientPlatform      = "claude_code_cli"
 	claudeFingerprintStainlessLang       = "js"
 	claudeFingerprintStainlessPkgVer     = "0.39.0"
@@ -177,7 +180,7 @@ func applyClaudeCodeFingerprint(c *gin.Context, req *http.Request, userSession s
 			setIfEmpty("anthropic-version", value)
 		}
 	}
-	setIfEmpty("User-Agent", claudeFingerprintUserAgent)
+	setIfEmpty("User-Agent", service.ActiveClaudeFingerprintUA())
 	setIfEmpty("anthropic-client-platform", claudeFingerprintClientPlatform)
 	setIfEmpty("anthropic-version", constant.AnthropicVersionDefault)
 	setIfEmpty("X-Stainless-Lang", claudeFingerprintStainlessLang)
@@ -239,7 +242,7 @@ func applyUpstreamClientFingerprint(c *gin.Context, info *common.RelayInfo, req 
 		req.Header.Set("originator", codexFingerprintOriginator)
 	}
 	if req.Header.Get("User-Agent") == "" {
-		req.Header.Set("User-Agent", codexFingerprintUserAgent)
+		req.Header.Set("User-Agent", service.ActiveCodexFingerprintUA())
 	}
 	if req.Header.Get("OpenAI-Beta") == "" {
 		req.Header.Set("OpenAI-Beta", codexFingerprintOpenAIBeta)

@@ -39,6 +39,10 @@ type ChannelAffinitySetting struct {
 	MaxEntries            int                   `json:"max_entries"`
 	DefaultTTLSeconds     int                   `json:"default_ttl_seconds"`
 	Rules                 []ChannelAffinityRule `json:"rules"`
+	// ClientVersionAutoSync 控制伪装指纹 UA 的版本是否自动跟线上官方发版对齐
+	// （service.StartClientFingerprintSyncTask）。关闭后停止自动同步，当前已同步
+	// 的版本保留至进程重启（重启后回到编译期默认版本）。
+	ClientVersionAutoSync bool `json:"client_version_auto_sync"`
 }
 
 // Keep Codex CLI passthrough aligned with upstream. Codex uses lower-case
@@ -135,6 +139,7 @@ var channelAffinitySetting = ChannelAffinitySetting{
 	KeepOnChannelDisabled: false,
 	MaxEntries:            100_000,
 	DefaultTTLSeconds:     3600,
+	ClientVersionAutoSync: true,
 	Rules: []ChannelAffinityRule{
 		{
 			Name:       "codex cli trace",

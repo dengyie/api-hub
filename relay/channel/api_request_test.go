@@ -16,6 +16,7 @@ import (
 	relayconstant "github.com/dengyie/apihub/relay/constant"
 	"github.com/dengyie/apihub/relaykit/dto"
 	"github.com/dengyie/apihub/relaykit/types"
+	"github.com/dengyie/apihub/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -630,7 +631,7 @@ func TestApplyUpstreamClientFingerprint(t *testing.T) {
 			model:         "GPT-5.6-luna",
 			clientHeaders: map[string]string{"User-Agent": "OpenAI/Python 1.99.0"},
 			want: map[string]string{
-				"User-Agent":            codexFingerprintUserAgent,
+				"User-Agent":            service.ActiveCodexFingerprintUA(),
 				"originator":            codexFingerprintOriginator,
 				"OpenAI-Beta":           codexFingerprintOpenAIBeta,
 				"X-Codex-Beta-Features": codexFingerprintBetaFeatures,
@@ -646,7 +647,7 @@ func TestApplyUpstreamClientFingerprint(t *testing.T) {
 				"x-opencode-session": "client-opencode-session",
 			},
 			want: map[string]string{
-				"User-Agent":            codexFingerprintUserAgent,
+				"User-Agent":            service.ActiveCodexFingerprintUA(),
 				"originator":            codexFingerprintOriginator,
 				"OpenAI-Beta":           codexFingerprintOpenAIBeta,
 				"X-Codex-Beta-Features": codexFingerprintBetaFeatures,
@@ -682,7 +683,7 @@ func TestApplyUpstreamClientFingerprint(t *testing.T) {
 			relayFormat:   types.RelayFormatClaude,
 			clientHeaders: map[string]string{"User-Agent": "OpenAI/Python 1.99.0"},
 			want: map[string]string{
-				"User-Agent":                  claudeFingerprintUserAgent,
+				"User-Agent":                  service.ActiveClaudeFingerprintUA(),
 				"anthropic-client-platform":   claudeFingerprintClientPlatform,
 				"anthropic-version":           constant.AnthropicVersionDefault,
 				"X-Stainless-Lang":            claudeFingerprintStainlessLang,
@@ -727,7 +728,7 @@ func TestApplyUpstreamClientFingerprint(t *testing.T) {
 			relayFormat:    types.RelayFormatClaude,
 			clientHeaders:  map[string]string{"User-Agent": "curl/8.7.1"},
 			want: map[string]string{
-				"User-Agent":                claudeFingerprintUserAgent,
+				"User-Agent":                service.ActiveClaudeFingerprintUA(),
 				"anthropic-client-platform": claudeFingerprintClientPlatform,
 				"anthropic-version":         constant.AnthropicVersionDefault,
 				"X-Session-UUID":            UserSessionUUID(7),
@@ -767,7 +768,7 @@ func TestApplyUpstreamClientFingerprint(t *testing.T) {
 			want: map[string]string{
 				"anthropic-beta":    "interleaved-thinking-2025-05-14",
 				"anthropic-version": "2023-06-01",
-				"User-Agent":        claudeFingerprintUserAgent,
+				"User-Agent":        service.ActiveClaudeFingerprintUA(),
 			},
 			wantAbsent: []string{"x-opencode-session"},
 		},
@@ -783,7 +784,7 @@ func TestApplyUpstreamClientFingerprint(t *testing.T) {
 			want: map[string]string{
 				"anthropic-client-platform":   "claude_code_cli",
 				"X-Stainless-Package-Version": "0.41.0",
-				"User-Agent":                  claudeFingerprintUserAgent,
+				"User-Agent":                  service.ActiveClaudeFingerprintUA(),
 			},
 			wantAbsent: []string{"x-opencode-session"},
 		},
@@ -805,7 +806,7 @@ func TestApplyUpstreamClientFingerprint(t *testing.T) {
 			finalRelayFormat: types.RelayFormatClaude,
 			clientHeaders:    map[string]string{"User-Agent": "OpenAI/Python 1.99.0"},
 			want: map[string]string{
-				"User-Agent":                claudeFingerprintUserAgent,
+				"User-Agent":                service.ActiveClaudeFingerprintUA(),
 				"anthropic-client-platform": claudeFingerprintClientPlatform,
 				"anthropic-version":         constant.AnthropicVersionDefault,
 			},
@@ -820,7 +821,7 @@ func TestApplyUpstreamClientFingerprint(t *testing.T) {
 				"User-Agent": "OpenAI/Python 1.99.0",
 			},
 			want: map[string]string{
-				"User-Agent":            codexFingerprintUserAgent,
+				"User-Agent":            service.ActiveCodexFingerprintUA(),
 				"originator":            codexFingerprintOriginator,
 				"OpenAI-Beta":           codexFingerprintOpenAIBeta,
 				"X-Codex-Beta-Features": codexFingerprintBetaFeatures,
@@ -838,7 +839,7 @@ func TestApplyUpstreamClientFingerprint(t *testing.T) {
 				"User-Agent": "curl/8.7.1",
 			},
 			want: map[string]string{
-				"User-Agent": codexFingerprintUserAgent,
+				"User-Agent": service.ActiveCodexFingerprintUA(),
 				"originator": codexFingerprintOriginator,
 			},
 			wantAbsent: []string{"x-opencode-session", "anthropic-client-platform", "X-Session-UUID"},
@@ -870,7 +871,7 @@ func TestApplyUpstreamClientFingerprint(t *testing.T) {
 			finalRelayFormat: types.RelayFormatClaude,
 			clientHeaders:    map[string]string{"User-Agent": "curl/8.7.1"},
 			want: map[string]string{
-				"User-Agent":                claudeFingerprintUserAgent,
+				"User-Agent":                service.ActiveClaudeFingerprintUA(),
 				"anthropic-client-platform": claudeFingerprintClientPlatform,
 				"anthropic-version":         constant.AnthropicVersionDefault,
 				"X-Session-UUID":            UserSessionUUID(7),

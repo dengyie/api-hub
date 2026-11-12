@@ -14,23 +14,29 @@ import (
 )
 
 const (
-	codexLatestReleaseURL      = "https://api.github.com/repos/openai/codex/releases/latest"
-	codexClientVersionCacheTTL = time.Hour
+	clientVersionCacheTTL = time.Hour
 )
 
-type codexClientVersionCache struct {
+// codexLatestReleaseURL 保持 var 便于测试注入本地桩源。
+var codexLatestReleaseURL = "https://api.github.com/repos/openai/codex/releases/latest"
+
+// clientVersionCache 是发布源版本号的 1h TTL 缓存，codex（GitHub releases）与
+// claude（npm registry）共用；解析逻辑由 fetch 字段注入，get 只管 TTL 与
+// "失败回退旧值、从未成功才报错"的兜底语义。
+type clientVersionCache struct {
 	sync.Mutex
 	version   string
 	expiresAt time.Time
+	fetch     func(ctx context.Context, client *http.Client, releaseURL string) (string, error)
 }
 
-var latestCodexClientVersion codexClientVersionCache
+var latestCodexClientVersion = clientVersionCache{fetch: fetchLatestCodexClientVersion}
 
 func GetLatestCodexClientVersion(ctx context.Context, client *http.Client) (string, error) {
 	return latestCodexClientVersion.get(ctx, client, codexLatestReleaseURL, time.Now())
 }
 
-func (cache *codexClientVersionCache) get(ctx context.Context, client *http.Client, releaseURL string, now time.Time) (string, error) {
+func (cache *clientVersionCache) get(ctx context.Context, client *http.Client, releaseURL string, now time.Time) (string, error) {
 	cache.Lock()
 	defer cache.Unlock()
 
@@ -38,17 +44,17 @@ func (cache *codexClientVersionCache) get(ctx context.Context, client *http.Clie
 		return cache.version, nil
 	}
 
-	version, err := fetchLatestCodexClientVersion(ctx, client, releaseURL)
+	version, err := cache.fetch(ctx, client, releaseURL)
 	if err != nil {
 		if cache.version != "" {
-			cache.expiresAt = now.Add(codexClientVersionCacheTTL)
+			cache.expiresAt = now.Add(clientVersionCacheTTL)
 			return cache.version, nil
 		}
 		return "", err
 	}
 
 	cache.version = version
-	cache.expiresAt = now.Add(codexClientVersionCacheTTL)
+	cache.expiresAt = now.Add(clientVersionCacheTTL)
 	return version, nil
 }
 
@@ -86,8 +92,10 @@ func fetchLatestCodexClientVersion(ctx context.Context, client *http.Client, rel
 		return "", fmt.Errorf("latest codex release is not stable")
 	}
 	version := strings.TrimSpace(release.Name)
-	if version == "" {
-		return "", fmt.Errorf("latest codex release has no version name")
+	// 与 claude 侧（client_fingerprint_version.go）同约定：发布源返回的版本
+	// 必须是纯数字分量，脏 name（README 名、错误页等）不得进入指纹 UA。
+	if validateFingerprintVersion(version) == "" {
+		return "", fmt.Errorf("latest codex release has no valid version: %q", version)
 	}
 	return version, nil
 }
