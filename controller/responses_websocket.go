@@ -59,6 +59,11 @@ var responsesWSRequestEngine = sync.OnceValue(func() *gin.Engine {
 		// 裸调一旦 panic 会一路穿过 ServeHTTP → runCall → ResponsesWebSocketHelper，
 		// 把整条 WebSocket 连接掀掉；HTTP 路径同样包了 recover，两条路径必须对称。
 		recordRequestErrorLogSafely(c, wsTurnRelayInfo(c), state.apiError)
+		// 与 HTTP 终结路径对称：渠道账号级失败（欠费/凭据）不得透出给客户端。
+		// WebSocket 的错误帧正文来自 state.apiError（buildResponsesWSErrorPayload），
+		// 不在 Relay 的终结 defer 覆盖范围内，必须在这里清洗；日志已经用原始
+		// 错误写过，排障不受影响。
+		state.apiError = sanitizeChannelScopedTerminalError(c, state.apiError)
 		if state.apiError != nil {
 			status := state.apiError.StatusCode
 			if status < http.StatusBadRequest {

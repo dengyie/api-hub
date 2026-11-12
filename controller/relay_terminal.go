@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -33,6 +34,59 @@ const upstreamToolCallStateLostMessage = "工具调用续接失败：当前渠�
 
 const upstreamReasoningHydrationErrorMessage = "跨账号推理思考密文校验失败：多轮会话中的加密思考项与上游账号不匹配。" +
 	"网关已自动尝试剥离加密项并自愈重试，若重试耗尽仍失败，建议新建会话重新开始。"
+
+// 渠道账号级故障（上游渠道自己欠费 / 凭据失效 / 分组无权）在池子耗尽后绝不能
+// 原样透给客户端：用户会把它读成「我的账户余额不足」或「我的 API Key 无效」，
+// 很多 SDK 据此判定 retryable: false 直接终止。客户端要的是「网关此刻没有能服务
+// 的渠道」这个路由结论，以及「可以重试」。渠道的真实报错（剩余余额、上游
+// request id 等）只属于排障信息，留在网关日志里。
+const (
+	upstreamChannelQuotaMessage = "上游渠道账号额度不足，网关已自动尝试其它渠道，但当前分组下暂时没有能服务该模型的可用渠道。" +
+		"这不是你的账户额度问题，请稍后重试；若持续出现请联系管理员补充上游渠道额度。"
+	upstreamChannelAccountMessage = "上游渠道账号鉴权或分组权限异常，网关已自动尝试其它渠道，但当前分组下暂时没有能服务该模型的可用渠道。" +
+		"这不是你的 API 凭据问题，请稍后重试；若持续出现请联系管理员检查上游渠道。"
+)
+
+// sanitizeChannelScopedTerminalError 在回给客户端的最后一跳，把「渠道账号级」
+// 失败改写成本网关自己的错误对象。必须在 applyRelayTerminalStatusShield 之前
+// 调用：盾标只改状态码，改不掉正文里的上游账目原文。
+//
+// 为什么必须整条替换而不是只改 message：ToOpenAIError / ToClaudeError 直接返回
+// RelayError 里的原始报文结构（relaykit/types/error.go），SetMessage 对它们
+// 无效；状态码与 code 也仍然来自上游（例如上游把 body 的 code 写成
+// insufficient_user_quota，WithOpenAIError 会把它当成 errorCode）。
+//
+// 只处理「已经走过渠道」的失败（use_channel 非空）。本地计费构造的用户欠费
+// （ErrorCodeInsufficientUserQuota）发生在选渠道之前，use_channel 为空，不受影响。
+// 工具调用会话丢失的 400 刻意保留原文：它是请求级的不可恢复错误，必须让客户端
+// 停下来（见 applyRelayTerminalStatusShield）。
+func sanitizeChannelScopedTerminalError(c *gin.Context, newAPIError *types.NewAPIError) *types.NewAPIError {
+	if newAPIError == nil || types.IsClientAbortedError(newAPIError) {
+		return newAPIError
+	}
+	if c == nil || len(c.GetStringSlice("use_channel")) == 0 {
+		return newAPIError
+	}
+	if loadbalancer.IsUpstreamToolCallStateLostError(newAPIError) {
+		return newAPIError
+	}
+	var message string
+	switch {
+	case loadbalancer.IsUpstreamQuotaError(newAPIError):
+		message = upstreamChannelQuotaMessage
+	case loadbalancer.IsUpstreamPermissionError(newAPIError) || newAPIError.StatusCode == http.StatusUnauthorized:
+		message = upstreamChannelAccountMessage
+	default:
+		return newAPIError
+	}
+	// 状态码固定 503：这是「本轮所有渠道都不可用」的网关侧结论，不是 4xx 的
+	// 客户端错误，也不是 CF 会吞掉正文的 502（见 relayGatewayFaultStatus）。
+	return types.NewErrorWithStatusCode(
+		errors.New(message),
+		types.ErrorCodeNoAvailableChannel,
+		relayGatewayFaultStatus,
+	)
+}
 
 // clientFacingGatewayStatus 把内部构造的 502 统一改写成 relayGatewayFaultStatus。
 // 只在「回给客户端」的最后一跳改写：内部错误分类、熔断判定、日志仍按原始状态码进行。
@@ -70,7 +124,15 @@ func applyRelayTerminalStatusShield(c *gin.Context, newAPIError *types.NewAPIErr
 		return
 	}
 	isUpstreamChannelError := c != nil && len(c.GetStringSlice("use_channel")) > 0
-	if isUpstreamChannelError && newAPIError.GetErrorCode() != types.ErrorCodeInsufficientUserQuota {
+	// 「用户自己欠费」只能由本地计费路径判定。上游响应体里的 code 会被
+	// WithOpenAIError/WithClaudeError 原样写成 errorCode（relaykit/types/error.go），
+	// 于是 errorCode == insufficient_user_quota 既可能是本地真实欠费，也可能是
+	// 上游渠道自己的欠费报文。用 use_channel 区分：已经走过渠道的失败一律按
+	// 渠道侧处理，绝不让上游的欠费冒充用户的欠费（2026-11-12 生产实测 #238
+	// 的 403 因此以 403 + insufficient_user_quota 原样回给了客户端）。
+	isUserQuotaDepleted := !isUpstreamChannelError &&
+		newAPIError.GetErrorCode() == types.ErrorCodeInsufficientUserQuota
+	if isUpstreamChannelError && !isUserQuotaDepleted {
 		// 「上游丢失工具调用会话状态」终结为原始 400，绝不盾标成 5xx：这份会话
 		// 历史里的 call_id 在上游已不存在，重试同一请求 100% 无效（生产实测 #248
 		// 同一 call_id 两小时被客户端重打 90 次）。客户端 SDK 对 4xx 停止重试、
@@ -113,32 +175,28 @@ func applyRelayTerminalStatusShield(c *gin.Context, newAPIError *types.NewAPIErr
 func clientFacingOpenAIError(c *gin.Context, newAPIError *types.NewAPIError, statusCode int) types.OpenAIError {
 	openAIErr := newAPIError.ToOpenAIError()
 	isUpstreamChannelError := c != nil && len(c.GetStringSlice("use_channel")) > 0
-	isUserQuotaDepleted := newAPIError.GetErrorCode() == types.ErrorCodeInsufficientUserQuota
+	// 与 applyRelayTerminalStatusShield 同口径：errorCode 只是上游响应体 code 的
+	// 副本（见 WithOpenAIError），见过渠道失败之后它不代表用户欠费。
+	isUserQuotaDepleted := !isUpstreamChannelError && newAPIError.GetErrorCode() == types.ErrorCodeInsufficientUserQuota
 
 	if statusCode >= http.StatusInternalServerError {
 		openAIErr.Code = statusCode
-		typeStr := strings.ToLower(openAIErr.Type)
-		if typeStr == "" || typeStr == "insufficient_quota" || typeStr == "invalid_request_error" ||
-			strings.Contains(typeStr, "auth") || strings.Contains(typeStr, "permission") ||
-			strings.Contains(typeStr, "key") || strings.Contains(typeStr, "quota") {
+		// 5xx 的 type 必须是客户端认得的服务端类别。我们自己的内部类型
+		// （new_api_error）和上游自造的 type（insufficient_quota /
+		// authentication_error …）都不能透出：前者是内部实现泄漏，后者会让
+		// SDK 把网关故障判成账户问题。标准的服务端类别原样保留。
+		switch strings.ToLower(openAIErr.Type) {
+		case "server_error", "api_error", "rate_limit_error", "overloaded_error":
+		default:
 			openAIErr.Type = "upstream_error"
 		}
 	} else if isUpstreamChannelError && !isUserQuotaDepleted {
-		codeStr := strings.ToLower(fmt.Sprintf("%v", openAIErr.Code))
-		if strings.Contains(codeStr, "quota") || strings.Contains(codeStr, "insufficient") ||
-			strings.Contains(codeStr, "invalid_api_key") || strings.Contains(codeStr, "account_deactivated") {
-			if statusCode == http.StatusTooManyRequests || loadbalancer.IsUpstreamRateLimitError(newAPIError) {
-				openAIErr.Code = "rate_limit_exceeded"
-			} else {
-				openAIErr.Code = statusCode
-			}
-		}
-		if openAIErr.Type == "insufficient_quota" {
-			if statusCode == http.StatusTooManyRequests || loadbalancer.IsUpstreamRateLimitError(newAPIError) {
-				openAIErr.Type = "rate_limit_error"
-			} else {
-				openAIErr.Type = "upstream_error"
-			}
+		// 上游渠道自造的 type 不得透出（见上）：一律按服务端故障类别清洗。
+		openAIErr.Type = "upstream_error"
+		// 上游把瞬时限流包成 code="insufficient_quota" 时（CPA/One-API 常见），
+		// 客户端 SDK 会据此判定账户欠费并停止重试；按真实语义改写成限流码。
+		if loadbalancer.IsUpstreamRateLimitError(newAPIError) {
+			openAIErr.Code = "rate_limit_exceeded"
 		}
 	}
 	return openAIErr
@@ -151,9 +209,14 @@ func clientFacingOpenAIError(c *gin.Context, newAPIError *types.NewAPIError, sta
 func clientFacingClaudeError(c *gin.Context, newAPIError *types.NewAPIError, statusCode int) types.ClaudeError {
 	claudeErr := newAPIError.ToClaudeError()
 	isUpstreamChannelError := c != nil && len(c.GetStringSlice("use_channel")) > 0
-	isUserQuotaDepleted := newAPIError.GetErrorCode() == types.ErrorCodeInsufficientUserQuota
+	// 与 applyRelayTerminalStatusShield 同口径：errorCode 只是上游响应体 code 的
+	// 副本（见 WithClaudeError / WithOpenAIError），见过渠道失败之后它不代表用户欠费。
+	isUserQuotaDepleted := !isUpstreamChannelError && newAPIError.GetErrorCode() == types.ErrorCodeInsufficientUserQuota
 
-	if statusCode >= http.StatusInternalServerError {
+	// 渠道侧的「额度不足 / 凭据无效」type 只在上游自报 429（瞬时频次）时讲得通；
+	// 其它状态码一律 api_error，不能让上游自造的 type 决定客户端是否重试。
+	if statusCode >= http.StatusInternalServerError ||
+		(isUpstreamChannelError && !isUserQuotaDepleted && statusCode != http.StatusTooManyRequests) {
 		claudeErr.Type = "api_error"
 	} else if isUpstreamChannelError && !isUserQuotaDepleted {
 		typeStr := strings.ToLower(claudeErr.Type)

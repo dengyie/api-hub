@@ -106,9 +106,20 @@ func executeRelayAttempt(
 	channel, channelErr := getChannel(c, relayInfo, retryParam)
 	if channelErr != nil {
 		logger.LogError(c, channelErr.Error())
-		if retryParam.GetRetry() > 0 && relayInfo.LastError != nil {
-			return relayAttemptOutcome{Success: false, WillRetry: false, Err: relayInfo.LastError}
-		}
+		// 选不出下一个渠道时，回给客户端的必须是「无可用渠道」本身，不能是
+		// 上一轮那条渠道的内部错误。
+		//
+		// 走到这里说明上一轮失败被判为可重试（WillRetry=true），否则循环早已
+		// break，不会再来选路。可重试的错误按构造就是渠道侧/瞬时的，把它们
+		// 原样回给客户端等于把渠道内部状态冒充成客户端错误：生产实测
+		// 2026-11-12 09:19（request 202611120119339817576915890cb63VCYO5Lt3）
+		// #238 的 403「余额不足：剩余 $0.140610」在池子耗尽后被当成这条请求的
+		// 最终错误，HTTP 403 + insufficient_user_quota——使用者看到的是自己
+		// 「余额不足」，而实际是那条上游渠道的账户余额，客户端据此判定
+		// retryable: false 直接终止。渠道欠费是网关的路由信息，不是客户端的
+		// 错误；客户端只需要知道「此刻没有能服务的渠道」并且可以重试。
+		// 原始失败原因已由每一轮的 ProcessChannelError 落盘（渠道号+原文），
+		// 排障不受影响。
 		return relayAttemptOutcome{Success: false, WillRetry: false, Err: channelErr}
 	}
 

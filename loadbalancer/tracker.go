@@ -511,8 +511,20 @@ func (h *RequestHandle) End(slow, failed bool) {
 				h.key.channelID, breakerKeyLabel(h.key), n, currentState == breakerHalfOpen,
 				cooldownSecondsFor(h.stats, policy.Breaker), h.stats.tripCount.Load())
 		}
-		// 失败也重置慢计数（失败已硬处理，不再叠加软降级）
+		// 失败也重置慢计数：连续慢计数只服务「没失败但慢」的软降级窗口。
 		h.stats.consecutiveSlowCount.Store(0)
+		// 慢与失败同时成立（首字超时、上游死挂后客户端断开）时，除了硬失败
+		// 计数，还必须留下「这条渠道慢」的选路可见证据。
+		//
+		// 豁免渠道（breaker_exempt）尤其依赖这条路径：TripBreaker* 对它们全是
+		// 空操作，若软降级也不记，选路对它们的慢完全无感——同一请求的后续
+		// 重试与后续请求都会落回同一条慢渠道（2026-11-12 生产实测：#278/#238
+		// 首字 85s 才超时，客户端重试 11 次全部回到同一池子）。软降级只影响
+		// 排序：还有别的候选时排最后，只剩它时照常使用，与 breaker_exempt
+		// 的「不可失去」语义一致。
+		if slow {
+			h.recordSlowDegrade(policy)
+		}
 	} else if slow {
 		// 慢信号（非硬失败）：只软降级，不触发硬熔断。
 		//
@@ -558,6 +570,29 @@ func (h *RequestHandle) End(slow, failed bool) {
 			h.stats.halfOpenSince.Store(0)
 		}
 	}
+}
+
+// recordSlowDegrade 把条目软降级一个短窗口：仍可用，但选路时排最后。
+//
+// 窗口取 rate_limit_cooldown_seconds（默认 30s）而不是那条 3 次慢才触发的
+// 10 分钟降级：首字超时本身已经是「上游在 ttft_timeout_ms 内一个字都没吐」
+// 的完整证据，不需要再等两次；30s 量级足够让紧接着的请求先试别的渠道，
+// 又不会把一条偶发慢的渠道长期压在末尾。
+// 只延长、不缩短已有的降级窗口（3 次慢触发的 10 分钟不能被一次更短的
+// 记录覆盖）。
+func (h *RequestHandle) recordSlowDegrade(policy ChannelPolicy) {
+	if !Enabled() {
+		return
+	}
+	cooldown := policy.Breaker.RateLimitCooldownSeconds
+	if cooldown <= 0 {
+		cooldown = 30
+	}
+	until := time.Now().Add(time.Duration(cooldown) * time.Second).Unix()
+	if h.stats.degradedUntil.Load() >= until {
+		return
+	}
+	h.stats.degradedUntil.Store(until)
 }
 
 // EndCancelled 请求被下游客户端主动取消时收尾：仅释放 inflight 资源，

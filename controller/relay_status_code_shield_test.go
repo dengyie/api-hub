@@ -545,3 +545,149 @@ func TestClientSafetyCeilingStreamVsNonStream(t *testing.T) {
 	}
 	assert.True(t, nonStreamCeiling.IsZero(), "非流式请求 safetyCeiling 必须为零值")
 }
+
+// 2026-11-12 生产证据（request 202611120119339817576915890cb63VCYO5Lt3）：
+// 渠道 #238 的 403 报文是「余额不足：剩余 ＄0.140610」，body 里还带
+// code/type=insufficient_user_quota。WithOpenAIError 把这个 code 原样写成
+// errorCode，于是盾标把它当成「用户自己欠费」而跳过改写，客户端最终收到
+// 403 + insufficient_user_quota + 上游渠道的余额原文。这组测试钉住：
+// 渠道级账目错误只能变成网关侧 503，正文里不能留下任何上游账目信息。
+func TestChannelScopedQuotaErrorNeverReachesClient(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	newCtx := func() (*gin.Context, *httptest.ResponseRecorder) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages?beta=true", nil)
+		c.Set("use_channel", []string{"278", "238"})
+		return c, w
+	}
+
+	upstreamErr := func() *types.NewAPIError {
+		return types.WithOpenAIError(types.OpenAIError{
+			Code: "insufficient_user_quota",
+			Type: "insufficient_user_quota",
+			Message: "余额不足：剩余 ＄0.140610，这次请求预估需要 ＄0.201990（按输入长度和 max_tokens 估算）。" +
+				"可以调低 max_tokens、改用免费模型，或到「喵乐园」赚罐罐换额度 📖 https://api.ilovecat520.me/docs#error-quota" +
+				" (request id: 202611120119344938502398268d9d6KrIhp1v3)",
+		}, http.StatusForbidden)
+	}
+
+	for _, format := range []struct {
+		name           string
+		relayFormat    types.RelayFormat
+		path           string
+		wantStatusText string
+	}{
+		{name: "claude messages", relayFormat: types.RelayFormatClaude, path: "/v1/messages", wantStatusText: "\"api_error\""},
+		{name: "openai chat", relayFormat: types.RelayFormatOpenAI, path: "/v1/chat/completions", wantStatusText: "\"upstream_error\""},
+	} {
+		t.Run(format.name, func(t *testing.T) {
+			c, w := newCtx()
+			c.Request = httptest.NewRequest(http.MethodPost, format.path, nil)
+			c.Set("use_channel", []string{"278", "238"})
+
+			err := sanitizeChannelScopedTerminalError(c, upstreamErr())
+			applyRelayTerminalStatusShield(c, err)
+			writeRelayTerminalError(c, nil, format.relayFormat, err)
+
+			assert.Equal(t, http.StatusServiceUnavailable, w.Code, "渠道欠费必须终结为网关侧 503")
+			body := w.Body.String()
+			for _, leak := range []string{"0.140610", "0.201990", "余额不足", "insufficient_user_quota", "ilovecat520", "202611120119344938502398268d9d6KrIhp1v3"} {
+				assert.NotContains(t, body, leak, "上游渠道的账目/身份信息绝不能出现在客户端响应里: %s", leak)
+			}
+			assert.Contains(t, body, "上游渠道账号额度不足")
+			assert.Contains(t, body, format.wantStatusText)
+		})
+	}
+}
+
+// 用户自己的欠费必须如实告知：本地计费在选渠道之前构造该错误，use_channel
+// 为空，清洗与盾标都不得改写它的状态码、type 或文案。
+func TestLocalUserQuotaErrorStillReachesClient(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	localErr := types.NewErrorWithStatusCode(
+		errors.New("用户额度不足, 剩余额度: 0"),
+		types.ErrorCodeInsufficientUserQuota,
+		http.StatusForbidden,
+	)
+
+	sanitized := sanitizeChannelScopedTerminalError(c, localErr)
+	require.Same(t, localErr, sanitized, "本地用户欠费不得被渠道清洗逻辑改写")
+	applyRelayTerminalStatusShield(c, sanitized)
+	writeRelayTerminalError(c, nil, types.RelayFormatOpenAI, sanitized)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	body := w.Body.String()
+	assert.Contains(t, body, "insufficient_user_quota")
+	assert.Contains(t, body, "用户额度不足")
+}
+
+// 渠道鉴权/分组权限失败同样不得透出上游凭据语义；401 与 403 都要归到网关侧。
+func TestChannelScopedPermissionErrorRewritten(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	for _, tc := range []struct {
+		name       string
+		statusCode int
+		message    string
+	}{
+		{name: "401 invalid key", statusCode: http.StatusUnauthorized, message: "Incorrect API key provided: sk-live-abcdef"},
+		{name: "403 group permission", statusCode: http.StatusForbidden, message: "无权访问 按量分组 分组 (request id: 202609280523093326619788268d9d6owlmt1Nf)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+			c.Set("use_channel", []string{"120"})
+
+			err := types.WithOpenAIError(types.OpenAIError{
+				Code:    "invalid_api_key",
+				Type:    "authentication_error",
+				Message: tc.message,
+			}, tc.statusCode)
+
+			err = sanitizeChannelScopedTerminalError(c, err)
+			applyRelayTerminalStatusShield(c, err)
+			writeRelayTerminalError(c, nil, types.RelayFormatOpenAI, err)
+
+			assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+			body := w.Body.String()
+			assert.NotContains(t, body, "invalid_api_key")
+			assert.NotContains(t, body, "authentication_error")
+			assert.NotContains(t, body, "sk-live-abcdef")
+			assert.Contains(t, body, "上游渠道账号鉴权或分组权限异常")
+		})
+	}
+}
+
+// 工具调用会话丢失是请求级的不可恢复错误，刻意保留 400 与原文让客户端停下
+// （见 applyRelayTerminalStatusShield 的说明）。它可能同时带有 403 状态码，
+// 清洗逻辑不能把它卷成 503。
+func TestChannelScopedToolCallStateLostStays400(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	c.Set("use_channel", []string{"155"})
+
+	err := types.NewErrorWithStatusCode(
+		errors.New("找不到可消费的工具调用状态：call_id=call_qGRzoQMDDF3pXgOX7gt6TFaw"),
+		types.ErrorCodeBadResponseStatusCode,
+		http.StatusBadRequest,
+	)
+
+	sanitized := sanitizeChannelScopedTerminalError(c, err)
+	require.Same(t, err, sanitized)
+	applyRelayTerminalStatusShield(c, sanitized)
+	writeRelayTerminalError(c, nil, types.RelayFormatOpenAI, sanitized)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "call_qGRzoQMDDF3pXgOX7gt6TFaw")
+}

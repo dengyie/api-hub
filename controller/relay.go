@@ -104,6 +104,11 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		service.RecordRequestPolicyTermination(c, newAPIError)
 		recordRequestErrorLogSafely(c, relayInfo, newAPIError)
 		logger.LogError(c, fmt.Sprintf("relay error: %s", common.LocalLogPreview(newAPIError.Error())))
+		// 渠道账号级失败（欠费/凭据）在盾标之前整条改写：盾标只改状态码，
+		// 改不掉正文里的上游账目原文；而 401 一经盾标就成了 503，再按状态码
+		// 判「是不是渠道鉴权失败」就判不出来了。原始错误已在上面的日志与
+		// 请求错误行里留痕。
+		newAPIError = sanitizeChannelScopedTerminalError(c, newAPIError)
 		applyRelayTerminalStatusShield(c, newAPIError)
 		newAPIError.SetMessage(common.MessageWithRequestId(clientFacingRelayMessage(newAPIError), requestId))
 		writeRelayTerminalError(c, ws, relayFormat, newAPIError)

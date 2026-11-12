@@ -47,7 +47,7 @@ func setupRelayAttemptDB(t *testing.T) *gorm.DB {
 	return database
 }
 
-func TestExecuteRelayAttemptPreservesLastErrorAndTelemetryWhenRetryGetChannelFails(t *testing.T) {
+func TestExecuteRelayAttemptReportsNoAvailableChannelWhenRetrySelectionExhausted(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	require.NoError(t, i18n.Init())
 	db := setupRelayAttemptDB(t)
@@ -102,7 +102,15 @@ func TestExecuteRelayAttemptPreservesLastErrorAndTelemetryWhenRetryGetChannelFai
 	outcome := executeRelayAttempt(c, types.RelayFormatOpenAI, relayInfo, retryParam, nil, nil)
 	assert.False(t, outcome.Success)
 	assert.False(t, outcome.WillRetry)
-	assert.Equal(t, priorErr, outcome.Err, "retry exhaustion must surface the real upstream LastError rather than no_available_channel")
+	require.NotNil(t, outcome.Err)
+	// 选不出下一个渠道时回给客户端的必须是「无可用渠道」，不能是上一轮那条
+	// 渠道的内部错误（2026-11-12 生产实测：上游 403 余额不足被当成客户端错误）。
+	assert.Equal(t, types.ErrorCodeNoAvailableChannel, outcome.Err.GetErrorCode())
+	assert.Equal(t, http.StatusServiceUnavailable, outcome.Err.StatusCode)
+	assert.NotContains(t, outcome.Err.Error(), "upstream 502 bad gateway",
+		"上一轮的渠道内部错误不得成为本次请求的最终客户端错误")
+	// 原始失败仍然完整保留在 LastError 上，供 ProcessChannelError 落盘的
+	// 错误行与后续排障使用。
 	assert.Equal(t, priorErr, relayInfo.LastError)
 	assert.Same(t, priorStreamStatus, relayInfo.StreamStatus, "failed retry selection must not wipe prior attempt StreamStatus")
 	assert.Equal(t, int8(1), relayInfo.ThinkTagSplit.Phase)
