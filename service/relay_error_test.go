@@ -418,6 +418,30 @@ func TestDecideRelayRetryReasoningHydrationError(t *testing.T) {
 	assert.Equal(t, "reasoning_hydration_failed", got.Reason)
 }
 
+// TestDecideRelayRetryHydrationByErrorCode 钉住「信号只在 code 里」的形态。
+//
+// 2026-11-12 生产实测（anyrouter #154）：上游返回的 message 是中继包装后的
+// 不透明文案 "bad response status code 400 (request id: ...)"，只有
+// code=invalid_encrypted_content 能说明这是跨账号密文不可解密。按 message 判定
+// 会漏掉整类失败——重试不打 StripResponsesReasoning（下一次照样 400），
+// 且健康渠道被判成中继代理异常、软降级 5 分钟。
+func TestDecideRelayRetryHydrationByErrorCode(t *testing.T) {
+	err := types.WithOpenAIError(types.OpenAIError{
+		Message: "bad response status code 400 (request id: 20261112184914474766441miWVrB88)",
+		Type:    "invalid_request_error",
+		Code:    "invalid_encrypted_content",
+	}, http.StatusBadRequest)
+	require.True(t, loadbalancer.IsReasoningHydrationError(err))
+
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	got := EvaluateRelayFailure(c, err, 2)
+
+	assert.Equal(t, "retry", got.PolicyDecision.Action)
+	assert.Equal(t, "reasoning_hydration_failed", got.PolicyDecision.Reason)
+	assert.True(t, got.StripResponsesReasoning, "下一次尝试必须剥离跨账号密文，否则同一个 400 会重复")
+	assert.Equal(t, BreakerNone, got.BreakerEffect, "跨账号密文不兼容不是渠道故障，不得降级/熔断健康渠道")
+}
+
 func TestEvaluateRelayFailure(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

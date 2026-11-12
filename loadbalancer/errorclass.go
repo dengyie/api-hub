@@ -256,13 +256,32 @@ func IsReasoningHydrationError(err *types.NewAPIError) bool {
 	if isHydrationMessage(strings.ToLower(err.Error())) {
 		return true
 	}
-	if oe, ok := err.RelayError.(types.OpenAIError); ok {
-		return isHydrationMessage(strings.ToLower(oe.Message))
+	// 上游也可能只把信号放在 code 里、message 留给中继包装文案。
+	// 2026-11-12 生产实测 anyrouter（new-api 家族）回的是：
+	//   {"error":{"message":"bad response status code 400 (request id: ...)",
+	//             "type":"invalid_request_error","code":"invalid_encrypted_content"}}
+	// message 完全不透明，唯一可辨的信号是 code。实测复现方式：往 input 里塞一条
+	// 来自别的账号的 encrypted_content 即稳定触发。
+	//
+	// 认不出来的后果不只是「归类不准」：IsUpstreamRelayError 里那条
+	// 「水合失败不算中继故障」的豁免会失效，于是健康渠道被判为
+	// 上游中继代理异常并软降级 5 分钟；DecideRelayRetry 也不会打
+	// StripResponsesReasoning，下一次重试照样带着跨账号密文再吃一次 400。
+	if isHydrationCode(string(err.GetErrorCode())) {
+		return true
 	}
-	if poe, ok := err.RelayError.(*types.OpenAIError); ok && poe != nil {
-		return isHydrationMessage(strings.ToLower(poe.Message))
+	if code, _, message, ok := openAIErrorFields(err.RelayError); ok {
+		return isHydrationMessage(message) || isHydrationCode(code)
 	}
 	return false
+}
+
+// isHydrationCode 判断错误 code 是否表示「跨账号密文不可解密」。
+// 只认 encrypted_content 这一族（invalid_encrypted_content 等），
+// 不用宽松的 "encrypted" 以免把无关的加解密校验错误一起吞掉。
+func isHydrationCode(code string) bool {
+	code = strings.ToLower(code)
+	return strings.Contains(code, "encrypted_content") || strings.Contains(code, "encrypted content")
 }
 
 // isHydrationMessage 是水合失败判据的唯一实现，三处调用点共用，避免口径漂移。

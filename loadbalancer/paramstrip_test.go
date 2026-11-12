@@ -408,3 +408,43 @@ func TestIsParamNotSupportedErrorInvalidRequestParamsNoFalsePositive(t *testing.
 			})
 		}
 	}
+
+// TestIsReasoningHydrationErrorByErrorCode 钉住「信号只在 code 里」的形态。
+//
+// 2026-11-12 生产实测（anyrouter #154，46 次 400 的主因）：上游把真正的诊断写进
+// code，message 只剩中继包装文案：
+//
+//	{"error":{"message":"bad response status code 400 (request id: ...)",
+//	          "type":"invalid_request_error","code":"invalid_encrypted_content"}}
+//
+// 复现方式：往 responses 的 input 里塞一条来自别的账号的 encrypted_content，
+// 上游稳定返回上面的 400。按 message 判定会漏掉整类失败，连带两个后果：
+//   - IsUpstreamRelayError 的「水合失败不算中继故障」豁免失效，健康渠道被判
+//     上游中继代理异常并软降级 5 分钟；
+//   - 重试决定不打 StripResponsesReasoning，下一次照样带着跨账号密文吃同一个 400。
+func TestIsReasoningHydrationErrorByErrorCode(t *testing.T) {
+	err := types.WithOpenAIError(types.OpenAIError{
+		Message: "bad response status code 400 (request id: 20261112184914474766441miWVrB88)",
+		Type:    "invalid_request_error",
+		Code:    "invalid_encrypted_content",
+	}, http.StatusBadRequest)
+	assert.True(t, IsReasoningHydrationError(err), "code=invalid_encrypted_content 必须识别为水合失败")
+	assert.False(t, IsUpstreamRelayError(err), "水合失败不得被判成中继代理异常而熔断健康渠道")
+
+	// errorCode 字段单独携带同一信号（无 RelayError）时也要认。
+	errCodeField := types.NewErrorWithStatusCode(
+		errors.New("bad response status code 400 (request id: 20261112060356329117045RS2tP4CS)"),
+		types.ErrorCode("invalid_encrypted_content"),
+		http.StatusBadRequest,
+	)
+	assert.True(t, IsReasoningHydrationError(errCodeField))
+
+	// 不带密文信号的普通中继包装 400 仍然是中继故障。
+	plain := types.NewErrorWithStatusCode(
+		errors.New("bad response status code 400 (request id: 20261112060356329117045RS2tP4CS)"),
+		types.ErrorCodeBadResponseBody,
+		http.StatusBadRequest,
+	)
+	assert.False(t, IsReasoningHydrationError(plain))
+	assert.True(t, IsUpstreamRelayError(plain))
+}
