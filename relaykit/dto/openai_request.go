@@ -341,8 +341,8 @@ func GetOpenAIChatCapabilities(modelName, reasoningEffort string) OpenAIChatCapa
 	// These standard GPT-5 models default to none and support sampling only
 	// without reasoning. Named variants (pro, codex, chat-latest, etc.) do not
 	// inherit this exception. GPT-6 Sol and Luna, including their 6.1 point
-	// releases, follow the same rule. GPT-6 Astra and Terra never support these
-	// parameters.
+	// releases, follow the same rule. GPT-6 Astra never supports these
+	// parameters; Terra is shaped the same way until its support is confirmed.
 	// https://developers.openai.com/api/docs/guides/latest-model?model=gpt-5.2
 	// https://developers.openai.com/api/docs/guides/latest-model?model=gpt-5.4
 	// https://developers.openai.com/api/docs/guides/latest-model?model=gpt-6-astra

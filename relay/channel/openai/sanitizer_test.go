@@ -397,6 +397,45 @@ func TestSanitizeModelCapabilitiesAndLimits(t *testing.T) {
 }
 
 func TestPostIntentSanitizeRequest(t *testing.T) {
+	// 端到端钉住 gpt-6.1-sol 的请求形状：能力表判定正确还不够，真正决定上游
+	// 是否 400 的是 sanitize 后发出的字段（角色、token 上限字段、采样参数）。
+	t.Run("gpt-6.1-sol gets GPT-6 shaping end to end", func(t *testing.T) {
+		tokens := uint(4096)
+		temp := 0.7
+		topP := 0.9
+		logProbs := true
+		req := &dto.GeneralOpenAIRequest{
+			Model: "gpt-6.1-sol",
+			Messages: []dto.Message{
+				{Role: "system", Content: "you are helpful"},
+				{Role: "user", Content: "hi"},
+			},
+			MaxTokens:   &tokens,
+			Temperature: &temp,
+			TopP:        &topP,
+			LogProbs:    &logProbs,
+		}
+		info := &relaycommon.RelayInfo{
+			ChannelMeta: &relaycommon.ChannelMeta{
+				ChannelId:         201,
+				ChannelType:       constant.ChannelTypeOpenAI,
+				UpstreamModelName: "gpt-6.1-sol",
+			},
+			OriginModelName: "gpt-6.1-sol",
+			ReasoningEffort: "high",
+		}
+
+		PostIntentSanitizeRequest(req, info)
+
+		assert.Nil(t, req.MaxTokens, "GPT-6 只接受 max_completion_tokens")
+		require.NotNil(t, req.MaxCompletionTokens)
+		assert.Equal(t, uint(4096), *req.MaxCompletionTokens)
+		assert.Equal(t, "developer", req.Messages[0].Role)
+		assert.Nil(t, req.Temperature, "开启推理时 GPT-6 采样参数必须剥离")
+		assert.Nil(t, req.TopP)
+		assert.Nil(t, req.LogProbs)
+	})
+
 	t.Run("cleans up capabilities, developer role, and assistant reasoning history", func(t *testing.T) {
 		rc := "prior reasoning"
 		msgs := []dto.Message{
