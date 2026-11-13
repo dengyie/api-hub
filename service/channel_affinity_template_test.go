@@ -298,9 +298,10 @@ func TestRecordChannelAffinityKeepsBindingWhenStreamDeliveredContent(t *testing.
 		RuleName:   "codex cli trace",
 	})
 	common.SetContextKey(ctx, constant.ContextKeyRelayInfo, &relaycommon.RelayInfo{
-		StreamStatus:          status,
-		ReceivedContentBytes:  128,
-		ReceivedResponseCount: 1,
+		StreamStatus:                status,
+		ReceivedContentBytes:        128,
+		ReceivedVisibleContentBytes: 128,
+		ReceivedResponseCount:       1,
 	})
 
 	RecordChannelAffinity(ctx, 154)

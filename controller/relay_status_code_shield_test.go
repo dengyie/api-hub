@@ -173,8 +173,11 @@ func TestWriteRelayTerminalErrorSkipsSSEFrameWhenAlreadyWrittenAndAborted(t *tes
 func TestZeroByteRetryableAndStreamDeliveredContent(t *testing.T) {
 	assert.False(t, streamDeliveredContent(nil))
 	assert.False(t, streamDeliveredContent(&relaycommon.RelayInfo{}))
-	assert.True(t, streamDeliveredContent(&relaycommon.RelayInfo{ReceivedResponseCount: 1}))
-	assert.True(t, streamDeliveredContent(&relaycommon.RelayInfo{ReceivedContentBytes: 8}))
+	// 结构帧（role/typed 状态事件）对用户不可见，不构成"已交付内容"：
+	// 断流后仍需允许换渠道重试。
+	assert.False(t, streamDeliveredContent(&relaycommon.RelayInfo{ReceivedResponseCount: 1}))
+	assert.False(t, streamDeliveredContent(&relaycommon.RelayInfo{ReceivedContentBytes: 8}))
+	assert.True(t, streamDeliveredContent(&relaycommon.RelayInfo{ReceivedVisibleContentBytes: 8}))
 
 	assert.False(t, zeroByteRetryable(nil))
 	assert.False(t, zeroByteRetryable(types.NewClientAbortedError(errors.New("canceled"))))
@@ -206,15 +209,21 @@ func TestIsClientAbortUpstreamHang(t *testing.T) {
 	_, _ = c1.Writer.Write([]byte("data: hi\n\n"))
 	assert.False(t, isClientAbortUpstreamHang(c1, &relaycommon.RelayInfo{}, time.Now().Add(-60*time.Second)))
 
-	// 2. relayInfo 记录已有响应帧 -> 不是假死逼退
+	// 2. relayInfo 只记录结构帧（role/typed 状态）-> 用户画面仍空白，
+	//    等待 60s 后离开仍属上游死挂
 	w2 := httptest.NewRecorder()
 	c2, _ := gin.CreateTestContext(w2)
-	assert.False(t, isClientAbortUpstreamHang(c2, &relaycommon.RelayInfo{ReceivedResponseCount: 2}, time.Now().Add(-60*time.Second)))
+	assert.True(t, isClientAbortUpstreamHang(c2, &relaycommon.RelayInfo{ReceivedResponseCount: 2}, time.Now().Add(-60*time.Second)))
 
-	// 3. relayInfo 记录已有字节 -> 不是假死逼退
+	// 3. relayInfo 记录结构帧字节 -> 同上，不构成可见交付
 	w3 := httptest.NewRecorder()
 	c3, _ := gin.CreateTestContext(w3)
-	assert.False(t, isClientAbortUpstreamHang(c3, &relaycommon.RelayInfo{ReceivedContentBytes: 100}, time.Now().Add(-60*time.Second)))
+	assert.True(t, isClientAbortUpstreamHang(c3, &relaycommon.RelayInfo{ReceivedContentBytes: 100}, time.Now().Add(-60*time.Second)))
+
+	// 3b. 已交付可见内容 -> 不是假死逼退
+	w3b := httptest.NewRecorder()
+	c3b, _ := gin.CreateTestContext(w3b)
+	assert.False(t, isClientAbortUpstreamHang(c3b, &relaycommon.RelayInfo{ReceivedVisibleContentBytes: 100}, time.Now().Add(-60*time.Second)))
 
 	// 4. 用户快速主动取消（耗时未达 30s，例如 5s） -> 正常交互取消，不计入假死逼退
 	w4 := httptest.NewRecorder()

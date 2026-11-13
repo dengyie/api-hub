@@ -248,8 +248,9 @@ func IsClientAbort(c *gin.Context, relayInfo *relaycommon.RelayInfo, err error) 
 //  1. 若 c == nil 或 c.Writer == nil 或 !c.Writer.Written()，响应未提交。
 //  2. 非流式请求一旦 Written() 即视为已向客户端写出 HTTP 状态或数据，不可换渠道重试。
 //  3. 流式请求中：
-//     若仅仅写入了 HTTP 响应头或 SSE 保活心跳（如 ": PING\n\n"），
-//     只要尚未向客户端交付任何有效的内容 Token（ReceivedResponseCount == 0 && ReceivedContentBytes == 0），
+//     若仅仅写入了 HTTP 响应头、SSE 保活心跳（如 ": PING\n\n"）或结构性帧
+//     （role-only delta、message_start/status 等用户不可见的事件），
+//     只要尚未向客户端交付任何可见内容（ReceivedVisibleContentBytes == 0），
 //     则不视为 response_committed，依然允许网关换渠道重试！
 //     下一个渠道的输出会继续流向这个已建立的 SSE 连接，客户端 JSON 解析器无感且连接得以保活。
 func isStreamContentCommitted(c *gin.Context) bool {
@@ -260,7 +261,7 @@ func isStreamContentCommitted(c *gin.Context) bool {
 	if !ok || relayInfo == nil || !relayInfo.IsStream {
 		return true
 	}
-	return relayInfo.ReceivedResponseCount > 0 || relayInfo.ReceivedContentBytes > 0
+	return relayInfo.ReceivedVisibleContentBytes > 0
 }
 
 // DecideRelayRetry is the single retry decision for relay attempts. The reason
@@ -271,8 +272,9 @@ func DecideRelayRetry(c *gin.Context, err *types.NewAPIError, retryTimes int) Po
 	}
 	// 响应已提交（首字节/SSE 事件已写出给下游客户端）：不能再向同一个连接缝合其他渠道的响应流，
 	// 必须立即停止换渠道重试，交由终结错误处理器向客户端发送标准 SSE 错误帧。
-	// 注意：流式请求中若仅发送了保活心跳（如 ": PING\n\n"），未向客户端交付任何有效业务 Token
-	// （ReceivedContentBytes == 0），则不视为 response_committed，允许继续换渠道重试。
+	// 注意：流式请求中若仅发送了保活心跳（如 ": PING\n\n"）或结构性帧（role/typed
+	// 状态事件），未向客户端交付任何可见业务内容（ReceivedVisibleContentBytes == 0），
+	// 则不视为 response_committed，允许继续换渠道重试。
 	if isStreamContentCommitted(c) {
 		return PolicyDecision{Action: "stop", Reason: "response_committed", Source: "system"}
 	}

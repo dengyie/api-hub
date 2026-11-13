@@ -420,6 +420,15 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 				// 累计实际内容字节数，用于检测"有块无内容"的空流
 				// （如 gemini 正常结束但 completion_tokens=0 的情况）
 				info.ReceivedContentBytes += len(data)
+				// 其中真正会渲染给用户的字节数：role/typed 状态帧不算交付，
+				// 断流后仍可安全换渠道重试。
+				if FrameCarriesVisibleContent(data) {
+					info.ReceivedVisibleContentBytes += len(data)
+				}
+				// 每收到一帧就续期：streamingTimeout 是「上游静默多久算挂」，
+				// 不是「整条流最长活多久」。不续期会把仍在正常输出的长流
+				// 在第 300 秒硬切，客户端看到的就是一条被掐断的回答。
+				ticker.Reset(streamingTimeout)
 
 				select {
 				case dataChan <- data:

@@ -1108,3 +1108,30 @@ func TestFirstTokenDeadline_PerAttemptWithinSafetyWindow(t *testing.T) {
 	info.RetryIndex = common.RetryTimes()
 	assert.WithinDuration(t, info.StartTime.Add(105*time.Second), FirstTokenDeadline(c, info), time.Second)
 }
+
+// 结构帧（role-only delta）只计入 ReceivedContentBytes，不计入可见内容：
+// 断流后能否换渠道取决于后者，否则「只发了 role 就断」会被误判成已交付。
+func TestStreamScannerHandler_CountsVisibleContentOnly(t *testing.T) {
+	t.Parallel()
+
+	roleFrame := `{"id":"c1","choices":[{"index":0,"delta":{"role":"assistant"}}]}`
+	contentFrame := `{"id":"c1","choices":[{"index":0,"delta":{"content":"hello"}}]}`
+	body := "data: " + roleFrame + "\n" + "data: " + contentFrame + "\n" + "data: [DONE]\n"
+
+	c, resp, info := setupStreamTest(t, strings.NewReader(body))
+
+	var mu sync.Mutex
+	var got []string
+	StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {
+		mu.Lock()
+		got = append(got, data)
+		mu.Unlock()
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, []string{roleFrame, contentFrame}, got)
+	assert.Equal(t, 2, info.ReceivedResponseCount)
+	assert.Equal(t, len(roleFrame)+len(contentFrame), info.ReceivedContentBytes)
+	assert.Equal(t, len(contentFrame), info.ReceivedVisibleContentBytes)
+}

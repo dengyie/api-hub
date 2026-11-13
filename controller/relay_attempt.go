@@ -38,11 +38,15 @@ func armRequestBudget(c *gin.Context, isStream bool, relayFormat types.RelayForm
 	return ctx, cancel
 }
 
+// streamDeliveredContent reports whether the client has received anything it
+// could render. Structural frames (role-only deltas, typed status events) are
+// deliberately excluded: they were written to the wire, but nothing visible was
+// delivered, so the request can still fail over to another channel.
 func streamDeliveredContent(relayInfo *relaycommon.RelayInfo) bool {
 	if relayInfo == nil {
 		return false
 	}
-	return relayInfo.ReceivedResponseCount > 0 || relayInfo.ReceivedContentBytes > 0
+	return relayInfo.ReceivedVisibleContentBytes > 0
 }
 
 func isClientAbortUpstreamHang(c *gin.Context, relayInfo *relaycommon.RelayInfo, attemptStartTime time.Time) bool {

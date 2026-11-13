@@ -860,7 +860,7 @@ func RecordChannelAffinity(c *gin.Context, channelID int) {
 	if relayInfo, ok := common.GetContextKeyType[*relaycommon.RelayInfo](c, constant.ContextKeyRelayInfo); ok &&
 		relayInfo != nil && relayInfo.StreamStatus != nil &&
 		relayInfo.StreamStatus.IsUpstreamStreamFault() && !relayInfo.StreamStatus.IsClientAbort() &&
-		relayInfo.ReceivedResponseCount == 0 && relayInfo.ReceivedContentBytes == 0 {
+		relayInfo.ReceivedVisibleContentBytes == 0 {
 		ClearCurrentChannelAffinityCache(c)
 		return
 	}

@@ -167,8 +167,16 @@ type RelayInfo struct {
 	// ReceivedContentBytes 流式响应累计内容字节数（去 SSE 帧头后）。
 	// 用于检测"有块无内容"的空流：正常结束但字节数极小（如只有空 delta），
 	// 视为上游空响应，触发换渠道重试。
-	ReceivedContentBytes  int
-	FinalPreConsumedQuota int // 最终预消耗的配额
+	ReceivedContentBytes int
+	// ReceivedVisibleContentBytes 其中真正会渲染给用户的字节数。
+	//
+	// ReceivedContentBytes 把 role/typed 状态帧也算进"已交付内容"，但这类帧对用户
+	// 不可见：客户端拿到 {"delta":{"role":"assistant"}} 后画面上仍是空白。用它做
+	// response_committed 判据会把「只发了结构帧就断流」误判成不可换渠道，客户端
+	// 最终收到 502 断流。这个计数器只累计携带 content/reasoning/tool_calls/
+	// finish_reason 等可见载荷的帧，作为「已经交付、不能再换渠道」的唯一依据。
+	ReceivedVisibleContentBytes int
+	FinalPreConsumedQuota       int // 最终预消耗的配额
 	// ForcePreConsume 为 true 时禁用 BillingSession 的信任额度旁路，
 	// 强制预扣全额。用于异步任务（视频/音乐生成等），因为请求返回后任务仍在运行，
 	// 必须在提交前锁定全额。
@@ -323,6 +331,7 @@ func (info *RelayInfo) InitChannelMeta(c *gin.Context) {
 	info.SendResponseCount = 0
 	info.ReceivedResponseCount = 0
 	info.ReceivedContentBytes = 0
+	info.ReceivedVisibleContentBytes = 0
 	info.ClaudeToChatStreamState = nil
 	info.ChatToGeminiStreamState = nil
 	channelType := common.GetContextKeyInt(c, constant.ContextKeyChannelType)

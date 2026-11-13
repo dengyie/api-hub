@@ -357,6 +357,94 @@ func IsEmptyStreamFrame(data string) bool {
 	return false
 }
 
+// FrameCarriesVisibleContent reports whether an SSE data frame carries payload
+// the downstream user can actually see: assistant text, reasoning, tool calls,
+// refusal/audio, or a finish marker. Structural frames — role-only deltas,
+// typed lifecycle events such as message_start or messageStatus, usage-only
+// frames — return false.
+//
+// The distinction matters for failover: a stream that dies after writing only
+// structural frames has delivered nothing the client rendered, so the relay may
+// keep the same SSE connection alive and retry the request on another channel.
+// Treating those frames as delivered content is what turns a mid-stream break
+// into a client-visible 502.
+//
+// Unknown shapes return true (conservative): a frame we cannot classify might be
+// real content, and duplicating an answer is worse than losing one failover.
+func FrameCarriesVisibleContent(data string) bool {
+	trimmed := strings.TrimSpace(data)
+	if trimmed == "" || trimmed == "[DONE]" {
+		return false
+	}
+	if !strings.HasPrefix(trimmed, "{") || !strings.HasSuffix(trimmed, "}") {
+		return true
+	}
+
+	// Error chunks carry a failure, not an answer; the handler turns them into
+	// the attempt error instead of forwarding them downstream.
+	if strings.Contains(trimmed, `"error"`) {
+		return false
+	}
+
+	// OpenAI chat.completions: role-only and empty deltas are structural.
+	if strings.Contains(trimmed, `"choices"`) {
+		if strings.Contains(trimmed, `"choices":null`) || strings.Contains(trimmed, `"choices": null`) ||
+			strings.Contains(trimmed, `"choices":[]`) || strings.Contains(trimmed, `"choices": []`) {
+			return false
+		}
+		if strings.Contains(trimmed, `"tool_calls"`) || strings.Contains(trimmed, `"function_call"`) {
+			return true
+		}
+		return hasNonEmptyField(trimmed, "content") ||
+			hasNonEmptyField(trimmed, "reasoning_content") ||
+			hasNonEmptyField(trimmed, "reasoning") ||
+			hasNonEmptyField(trimmed, "thinking") ||
+			hasNonEmptyField(trimmed, "text") ||
+			hasNonEmptyField(trimmed, "finish_reason") ||
+			hasNonEmptyField(trimmed, "refusal") ||
+			hasNonEmptyField(trimmed, "audio") ||
+			hasNonEmptyField(trimmed, "annotations")
+	}
+
+	// Gemini: content lives under candidates[].content.parts[].text.
+	if strings.Contains(trimmed, `"candidates"`) {
+		if strings.Contains(trimmed, `"functionCall"`) || strings.Contains(trimmed, `"inlineData"`) ||
+			strings.Contains(trimmed, `"executableCode"`) {
+			return true
+		}
+		return hasNonEmptyField(trimmed, "text")
+	}
+
+	// Typed event streams (Claude SSE, OpenAI Responses, Realtime, Images).
+	if strings.Contains(trimmed, `"type"`) {
+		if strings.Contains(trimmed, `"tool_calls"`) || strings.Contains(trimmed, `"function_call"`) ||
+			strings.Contains(trimmed, `"tool_use"`) || strings.Contains(trimmed, `"functionCall"`) ||
+			strings.Contains(trimmed, `"input_json_delta"`) {
+			return true
+		}
+		return hasNonEmptyField(trimmed, "text") ||
+			hasNonEmptyField(trimmed, "delta") ||
+			hasNonEmptyField(trimmed, "content") ||
+			hasNonEmptyField(trimmed, "reasoning_content") ||
+			hasNonEmptyField(trimmed, "reasoning") ||
+			hasNonEmptyField(trimmed, "thinking") ||
+			hasNonEmptyField(trimmed, "refusal") ||
+			hasNonEmptyField(trimmed, "stop_reason") ||
+			hasNonEmptyField(trimmed, "finish_reason")
+	}
+
+	// Usage-only frames are accounting metadata, not answer text.
+	if strings.Contains(trimmed, `"prompt_tokens"`) || strings.Contains(trimmed, `"total_tokens"`) ||
+		strings.Contains(trimmed, `"completion_tokens"`) || strings.Contains(trimmed, `"input_tokens"`) ||
+		strings.Contains(trimmed, `"output_tokens"`) {
+		return hasNonEmptyField(trimmed, "content") ||
+			hasNonEmptyField(trimmed, "text") ||
+			hasNonEmptyField(trimmed, "delta")
+	}
+
+	return true
+}
+
 func hasNonEmptyField(data string, field string) bool {
 	target := `"` + field + `"`
 	idx := strings.Index(data, target)
