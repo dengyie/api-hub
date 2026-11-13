@@ -445,6 +445,13 @@ func fetchChannelUpstreamModelIDs(channel *model.Channel) ([]string, error) {
 		} else {
 			url = fmt.Sprintf("%s/api/v3/models", baseURL)
 		}
+	case constant.ChannelTypeBaiduV2:
+		// 千帆 v2 的模型列表在 /v2/models；Token Plan 特殊 base 自带完整根路径。
+		if plan, ok := constant.ChannelSpecialBases[baseURL]; ok && plan.OpenAIBaseURL != "" {
+			url = fmt.Sprintf("%s/models", plan.OpenAIBaseURL)
+		} else {
+			url = fmt.Sprintf("%s/v2/models", baseURL)
+		}
 	case constant.ChannelTypeMoonshot:
 		if plan, ok := constant.ChannelSpecialBases[baseURL]; ok && plan.OpenAIBaseURL != "" {
 			url = fmt.Sprintf("%s/models", plan.OpenAIBaseURL)

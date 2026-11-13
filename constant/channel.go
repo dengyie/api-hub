@@ -239,6 +239,11 @@ var ChannelSpecialBases = map[string]ChannelSpecialBase{
 		ClaudeBaseURL: "https://ark.cn-beijing.volces.com/api/coding",
 		OpenAIBaseURL: "https://ark.cn-beijing.volces.com/api/coding/v3",
 	},
+	// 百度千帆 Token Plan 个人版：Token Plan Person 密钥只在该路径下生效，
+	// 标准 /v2/chat/completions 会返回 token_plan_person_api_key_not_allowed。
+	"qianfan-tokenplan-personal": {
+		OpenAIBaseURL: "https://qianfan.baidubce.com/v2/tokenplan/personal",
+	},
 }
 
 // IsAdvancedCustomChannel includes named channels backed by route presets.

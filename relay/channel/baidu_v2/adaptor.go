@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	channelconstant "github.com/dengyie/apihub/constant"
 	"github.com/dengyie/apihub/relay/channel"
 	"github.com/dengyie/apihub/relay/channel/openai"
 	relaycommon "github.com/dengyie/apihub/relay/common"
@@ -44,6 +45,17 @@ func (a *Adaptor) Init(info *relaycommon.RelayInfo) {
 }
 
 func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
+	// Special bases (e.g. Qianfan Token Plan) already carry their own API root,
+	// so the endpoint suffix is appended without the canonical /v2 prefix.
+	if specialPlan, ok := channelconstant.ChannelSpecialBases[info.ChannelBaseUrl]; ok {
+		switch info.RelayMode {
+		case constant.RelayModeChatCompletions:
+			return fmt.Sprintf("%s/chat/completions", specialPlan.OpenAIBaseURL), nil
+		case constant.RelayModeEmbeddings:
+			return fmt.Sprintf("%s/embeddings", specialPlan.OpenAIBaseURL), nil
+		}
+		return "", fmt.Errorf("unsupported relay mode for special base %s: %d", info.ChannelBaseUrl, info.RelayMode)
+	}
 	switch info.RelayMode {
 	case constant.RelayModeChatCompletions:
 		return fmt.Sprintf("%s/v2/chat/completions", info.ChannelBaseUrl), nil
