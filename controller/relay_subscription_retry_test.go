@@ -40,6 +40,10 @@ const invalidSubscriptionBody = `{"error":{"code":"InvalidSubscription","message
 
 const subRetryModel = "sub-retry-e2e-model"
 
+// subRetryBadKey 是坏渠道假 key，DB 行与 setupChannelContext 必须一致，
+// 提成常量避免两处硬编码漂移。
+const subRetryBadKey = "sk-sub-retry-bad"
+
 type subscriptionRetryFixture struct {
 	BadHits  atomic.Int32
 	GoodHits atomic.Int32
@@ -128,7 +132,7 @@ func setupSubscriptionRetryRelay(t *testing.T) *subscriptionRetryFixture {
 	require.NoError(t, database.Create(&model.Channel{
 		Id:       9101,
 		Type:     constant.ChannelTypeOpenAI,
-		Key:      "sk-sub-retry-bad",
+		Key:      subRetryBadKey,
 		Status:   common.ChannelStatusEnabled,
 		Name:     "sub-retry-bad",
 		Weight:   &weight,
@@ -229,7 +233,7 @@ func newSubscriptionRetryRequest(t *testing.T, fixture *subscriptionRetryFixture
 	common.SetContextKey(c, constant.ContextKeyUserSetting, dto.UserSetting{BillingPreference: "wallet_only"})
 	common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
 	// 首轮渠道由 distributor 选出（同优先级下权重随机此处固定为坏渠道）。
-	setupChannelContext(t, c, 9101, "sub-retry-bad", fixture.BadURL, "sk-sub-retry-bad")
+	setupChannelContext(t, c, 9101, "sub-retry-bad", fixture.BadURL, subRetryBadKey)
 	return c, recorder
 }
 
@@ -270,9 +274,11 @@ func TestRelayInvalidSubscriptionPolicyAndHealth(t *testing.T) {
 	fixture := setupSubscriptionRetryRelay(t)
 
 	tracker := loadbalancer.GlobalTracker()
+	// 用专用复位 API 清理：Begin().End(false,false) 对熔断状态是 no-op，
+	// 已 trip 的渠道会泄漏到后续测试，造成 IsAvailable 断言假绿。
 	t.Cleanup(func() {
-		tracker.Begin(9101, subRetryModel).End(false, false)
-		tracker.Begin(9102, subRetryModel).End(false, false)
+		tracker.ResetChannelBreakers(9101)
+		tracker.ResetChannelBreakers(9102)
 	})
 
 	c, recorder := newSubscriptionRetryRequest(t, fixture)

@@ -426,25 +426,36 @@ func IsUpstreamPermissionError(err *types.NewAPIError) bool {
 // isUpstreamSubscriptionInvalidCode 识别上游报文里结构化的订阅失效错误码。
 // 火山方舟 CodingPlan 过期时返回 HTTP 400 + code=InvalidSubscription；部分
 // 上游用 invalid_subscription。消息措辞可能被中转站改写，结构化 code 是
-// 更稳的信号，所以 code 与消息两条路都收。
+// 更稳的信号，所以 code 与消息两条路都收。仅 InvalidSubscription /
+// invalid_subscription 有生产实证（2026-11-15 渠道 #365 故障）；其余两个码
+// 是同族推测扩展，语义上只可能来自上游订阅体系，误纳面积极窄。
 func isUpstreamSubscriptionInvalidCode(err *types.NewAPIError) bool {
 	if err == nil {
 		return false
 	}
-	codeStr := strings.ToLower(string(err.GetErrorCode()))
-	if codeStr == "invalidsubscription" || codeStr == "invalid_subscription" ||
-		codeStr == "subscription_expired" || codeStr == "subscription_not_found" {
+	return isSubscriptionInvalidCodeStr(string(err.GetErrorCode())) ||
+		isSubscriptionInvalidCodeStr(relayErrorCodeString(err.RelayError))
+}
+
+// relayErrorCodeString 取 RelayError 里的结构化 code，无结构化字段则空串。
+func relayErrorCodeString(relayErr any) string {
+	switch oe := relayErr.(type) {
+	case types.OpenAIError:
+		return fmt.Sprintf("%v", oe.Code)
+	case *types.OpenAIError:
+		if oe == nil {
+			return ""
+		}
+		return fmt.Sprintf("%v", oe.Code)
+	}
+	return ""
+}
+
+func isSubscriptionInvalidCodeStr(code string) bool {
+	switch strings.ToLower(code) {
+	case "invalidsubscription", "invalid_subscription",
+		"subscription_expired", "subscription_not_found":
 		return true
-	}
-	if oe, ok := err.RelayError.(types.OpenAIError); ok {
-		codeStr = strings.ToLower(fmt.Sprintf("%v", oe.Code))
-		return codeStr == "invalidsubscription" || codeStr == "invalid_subscription" ||
-			codeStr == "subscription_expired" || codeStr == "subscription_not_found"
-	}
-	if poe, ok := err.RelayError.(*types.OpenAIError); ok && poe != nil {
-		codeStr = strings.ToLower(fmt.Sprintf("%v", poe.Code))
-		return codeStr == "invalidsubscription" || codeStr == "invalid_subscription" ||
-			codeStr == "subscription_expired" || codeStr == "subscription_not_found"
 	}
 	return false
 }
