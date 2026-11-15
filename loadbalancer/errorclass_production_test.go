@@ -254,4 +254,9 @@ func TestInvalidSubscriptionIsPermission_Issue365(t *testing.T) {
 	// 措辞没有扩大到任意 "subscription" 子串。
 	assert.False(t, IsUpstreamPermissionError(newTextError("Invalid parameter: 'temperature' must be between 0 and 2", http.StatusBadRequest)))
 	assert.False(t, IsUpstreamPermissionError(newTextError("subscription plan details are available at example.com", http.StatusBadRequest)))
+	// "subscription has expired" 措辞必须带主语 "your"（生产报文原文）才认：
+	// 无主语的巧合文本（如上游回传的续订提醒片段）不构成渠道账号订阅失效的
+	// 证据，误纳会把健康渠道熔断 1800s 级别。
+	assert.False(t, IsUpstreamPermissionError(newTextError("renewal reminder: subscription has expired last month, see docs", http.StatusBadRequest)))
+	assert.True(t, IsUpstreamPermissionError(newTextError("your subscription has expired", http.StatusBadRequest)))
 }

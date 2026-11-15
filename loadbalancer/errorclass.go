@@ -377,7 +377,7 @@ func IsUpstreamPermissionError(err *types.NewAPIError) bool {
 		strings.Contains(msg, "is not supported by token plan") ||
 		strings.Contains(msg, "does not have a valid codingplan subscription") ||
 		strings.Contains(msg, "does not have a valid subscription") ||
-		strings.Contains(msg, "subscription has expired") ||
+		strings.Contains(msg, "your subscription has expired") ||
 		strings.Contains(msg, "permission denied") ||
 		strings.Contains(msg, "permission_denied") ||
 		strings.Contains(msg, "operation not allowed") ||
