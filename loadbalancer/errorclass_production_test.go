@@ -218,3 +218,40 @@ func TestParseMaxCompletionTokensLimitRangeWording(t *testing.T) {
 		})
 	}
 }
+
+// TestInvalidSubscriptionIsPermission_Issue365 钉住 2026-11-15 生产故障（渠道
+// #365 火山方舟 CodingPlan）。上游报文（账号 id 与 url 已脱敏，其余逐字）：
+//
+//	HTTP 400 {"error":{"code":"InvalidSubscription","message":"Your account
+//	(2130009832) does not have a valid CodingPlan subscription, or your
+//	subscription has expired. ...","type":"upstream_error"}}
+//
+// 修复前它在全部分类器上漏判，落入 status_not_retryable 提前终止：不换渠道、
+// 不熔断，失效渠道留在轮转里十秒一次反复接流量（00:45-00:46 累计 462 次）。
+// 订阅失效是渠道账号的套餐问题，与 "not supported by TokenPlan" 同族，必须
+// 归入权限分类。
+func TestInvalidSubscriptionIsPermission_Issue365(t *testing.T) {
+	const message = "Your account (2130009832) does not have a valid CodingPlan subscription, or your subscription has expired. Please visit https://***.com/***/***?OpenModelVisible=false&tab=CodingPlan to review your subscription status or complete the subscription or renewal process.  Request id: 021794753211131bba9dcb446c9769753d8e06563bdd07fd0f77a"
+
+	// 消息措辞路径：中转站可能抹掉结构化 code 只留描述。
+	msgErr := newTextError(message, http.StatusBadRequest)
+	assert.True(t, IsUpstreamPermissionError(msgErr), "订阅失效描述必须归入权限分类")
+	// 并入 relay 分类是既有口径（IsUpstreamRelayError 透传 permission）。
+	assert.True(t, IsUpstreamRelayError(msgErr))
+
+	// 结构化 code 路径：RelayErrorHandler 把上游 JSON 解析成 OpenAIError 后
+	// code=InvalidSubscription。消息可能被改写，code 是更稳的信号。
+	structured := types.NewErrorWithStatusCode(errors.New(message), types.ErrorCodeBadResponseStatusCode, http.StatusBadRequest)
+	structured.RelayError = types.OpenAIError{Code: "InvalidSubscription", Message: message, Type: ""}
+	assert.True(t, IsUpstreamPermissionError(structured), "结构化 code=InvalidSubscription 必须识别")
+
+	snakeCode := types.NewErrorWithStatusCode(errors.New("subscription unavailable"), types.ErrorCodeBadResponseStatusCode, http.StatusBadRequest)
+	snakeCode.RelayError = types.OpenAIError{Code: "invalid_subscription", Message: "subscription unavailable"}
+	assert.True(t, IsUpstreamPermissionError(snakeCode))
+
+	// 反向守卫：普通参数错误 400 不因这些新增措辞被误认成订阅失效。注意
+	// "Invalid parameter" 不含 "does not have a valid"，但这条同时验证新增
+	// 措辞没有扩大到任意 "subscription" 子串。
+	assert.False(t, IsUpstreamPermissionError(newTextError("Invalid parameter: 'temperature' must be between 0 and 2", http.StatusBadRequest)))
+	assert.False(t, IsUpstreamPermissionError(newTextError("subscription plan details are available at example.com", http.StatusBadRequest)))
+}

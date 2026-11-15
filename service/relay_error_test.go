@@ -164,6 +164,14 @@ func TestDecideRelayRetryReasons(t *testing.T) {
 		{name: "upstream gateway timeout 504 retries", err: upstream(http.StatusGatewayTimeout), retries: 1, want: PolicyDecision{Action: "retry", Reason: "retry_status_matched", Source: "global"}},
 		{name: "success status never retries", err: upstream(http.StatusOK), retries: 1, want: PolicyDecision{Action: "stop", Reason: "system_retry_exclusion", Source: "system"}},
 		{name: "skip retry error", err: types.NewErrorWithStatusCode(errors.New("local"), types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry()), retries: 1, want: PolicyDecision{Action: "stop", Reason: "non_retryable_error", Source: "system"}},
+		// 本地计费错误（用户自身欠费 403）带 skipRetry 标记，必须先于权限
+		// 启发式：否则 "403 即上游权限错误" 会把本地 403 反复换渠道重试，
+		// 烧完整轮预算还把客户端错误伪装成可重试故障。
+		{name: "local insufficient quota 403 never retries", err: types.NewErrorWithStatusCode(fmt.Errorf("用户额度不足, 剩余额度: ＄0.000001"), types.ErrorCodeInsufficientUserQuota, http.StatusForbidden, types.ErrOptionWithSkipRetry()), retries: 3, want: PolicyDecision{Action: "stop", Reason: "non_retryable_error", Source: "system"}},
+		// 上游订阅失效（2026-11-15 渠道 #365 火山 CodingPlan 生产故障形状，
+		// HTTP 400 + 订阅过期描述）归入权限分类，同请求内换渠道重试。
+		{name: "upstream invalid subscription 400 retries", err: types.NewOpenAIError(errors.New("Your account (2130009832) does not have a valid CodingPlan subscription, or your subscription has expired."), types.ErrorCodeBadResponseStatusCode, http.StatusBadRequest), retries: 3, want: PolicyDecision{Action: "retry", Reason: "upstream_permission_denied", Source: "loadbalancer"}},
+		{name: "upstream invalid subscription structured code retries", err: types.WithOpenAIError(types.OpenAIError{Code: "InvalidSubscription", Message: "subscription unavailable"}, http.StatusBadRequest), retries: 3, want: PolicyDecision{Action: "retry", Reason: "upstream_permission_denied", Source: "loadbalancer"}},
 		{name: "channel error retries", err: types.NewError(errors.New("no key"), types.ErrorCodeChannelNoAvailableKey), retries: 1, want: PolicyDecision{Action: "retry", Reason: "channel_error", Source: "system"}},
 		// "channel:" 前缀错误曾经无条件换渠道重试，绕过了上面两道闸门。
 		{name: "channel error respects budget", err: types.NewError(errors.New("no key"), types.ErrorCodeChannelNoAvailableKey), retries: 0, want: PolicyDecision{Action: "stop", Reason: "attempt_budget_exhausted", Source: "global"}},

@@ -349,6 +349,15 @@ func IsUpstreamToolCallStateLostError(err *types.NewAPIError) bool {
 // 这类错误属于上游渠道配置、分组或套餐权限缺陷，而非下游客户端认证失败。
 // 应触发换渠道重试与即时熔断隔离，并在透传保护中映射为网关侧故障码（503，见 controller/relay.go）
 // 避免客户端把上游配置缺陷误当成自己的凭证错误而终止会话。
+//
+// 2026-11-15 生产故障（渠道 #365 火山方舟 CodingPlan）补入订阅失效识别：
+// 上游订阅过期返回 HTTP 400 + code=InvalidSubscription + "does not have a
+// valid CodingPlan subscription, or your subscription has expired"。此前该
+// 形状在所有分类器全部漏判，落入 status_not_retryable 提前终止重试——失效
+// 渠道既不换渠道也不熔断，留在轮转里反复接流量（00:45-00:46 十秒一次持续
+// 462 次）。它本质是渠道账号的套餐订阅问题，与 "not supported by TokenPlan"
+// 同族，归入本分类后由既有链路统一处置：换渠道重试、BreakerPermission 单次
+// 熔断、终态 sanitize + 503 盾。
 func IsUpstreamPermissionError(err *types.NewAPIError) bool {
 	if err == nil {
 		return false
@@ -366,12 +375,18 @@ func IsUpstreamPermissionError(err *types.NewAPIError) bool {
 		strings.Contains(msg, "not supported by token plan") ||
 		strings.Contains(msg, "is not supported by tokenplan") ||
 		strings.Contains(msg, "is not supported by token plan") ||
+		strings.Contains(msg, "does not have a valid codingplan subscription") ||
+		strings.Contains(msg, "does not have a valid subscription") ||
+		strings.Contains(msg, "subscription has expired") ||
 		strings.Contains(msg, "permission denied") ||
 		strings.Contains(msg, "permission_denied") ||
 		strings.Contains(msg, "operation not allowed") ||
 		strings.Contains(msg, "your account is not authorized") ||
 		strings.Contains(msg, "not allowed for user type") ||
 		(strings.Contains(msg, "当前分组") && (strings.Contains(msg, "不可调用") || strings.Contains(msg, "无可用渠道") || strings.Contains(msg, "无权"))) {
+		return true
+	}
+	if isUpstreamSubscriptionInvalidCode(err) {
 		return true
 	}
 	if oe, ok := err.RelayError.(types.OpenAIError); ok {
@@ -404,6 +419,32 @@ func IsUpstreamPermissionError(err *types.NewAPIError) bool {
 			strings.Contains(msgStr, "not allowed for user type") {
 			return true
 		}
+	}
+	return false
+}
+
+// isUpstreamSubscriptionInvalidCode 识别上游报文里结构化的订阅失效错误码。
+// 火山方舟 CodingPlan 过期时返回 HTTP 400 + code=InvalidSubscription；部分
+// 上游用 invalid_subscription。消息措辞可能被中转站改写，结构化 code 是
+// 更稳的信号，所以 code 与消息两条路都收。
+func isUpstreamSubscriptionInvalidCode(err *types.NewAPIError) bool {
+	if err == nil {
+		return false
+	}
+	codeStr := strings.ToLower(string(err.GetErrorCode()))
+	if codeStr == "invalidsubscription" || codeStr == "invalid_subscription" ||
+		codeStr == "subscription_expired" || codeStr == "subscription_not_found" {
+		return true
+	}
+	if oe, ok := err.RelayError.(types.OpenAIError); ok {
+		codeStr = strings.ToLower(fmt.Sprintf("%v", oe.Code))
+		return codeStr == "invalidsubscription" || codeStr == "invalid_subscription" ||
+			codeStr == "subscription_expired" || codeStr == "subscription_not_found"
+	}
+	if poe, ok := err.RelayError.(*types.OpenAIError); ok && poe != nil {
+		codeStr = strings.ToLower(fmt.Sprintf("%v", poe.Code))
+		return codeStr == "invalidsubscription" || codeStr == "invalid_subscription" ||
+			codeStr == "subscription_expired" || codeStr == "subscription_not_found"
 	}
 	return false
 }
