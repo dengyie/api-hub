@@ -241,3 +241,67 @@ func TestGatewayModelDisabledNeverAutoDisables(t *testing.T) {
 	}
 	assert.False(t, classifyAutoDisable(channelID, gatewayDisabledErr).Disable)
 }
+
+// TestSubscriptionInvalidAutoDisables 钉住 2026-11-16 深修（渠道 #365 火山方舟
+// CodingPlan 过期）：400+InvalidSubscription 是**确定性失效**——人工换 key/
+// 续订才恢复，且状态码 400 天然不在自动禁用状态码表（401/403/404）里、关键词
+// 表也没收订阅措辞，四条判据全漏。修复前渠道全天 821 次 400 在「熔断→自愈→
+// 回池→再 400」里打转，永不退池。
+//
+// 三个方向都必须钉死：
+//  1. classifyAutoDisable 给出「摘」的结论，落 subscription_invalid 类别；
+//  2. 佐证按渠道级分桶（跨模型共享证据——账号订阅失效与请求哪个模型无关）；
+//  3. 攒满阈值后 ShouldDisableChannelCorroborated 放行不可逆禁用。
+func TestSubscriptionInvalidAutoDisables(t *testing.T) {
+	newCorroborationFixture(t, 3)
+	const channelID = 9301
+	defer loadbalancer.ResetCorroborationForChannel(channelID)
+
+	const message = "Your account (2130009832) does not have a valid CodingPlan subscription, or your subscription has expired. Please visit https://***.com/***/***?OpenModelVisible=false&tab=CodingPlan to review your subscription status or complete the subscription or renewal process.  Request id: 021794753211131bba9dcb446c9769753d8e06563bdd07fd0f77a"
+	// 措辞路径：HTTP 400 + 生产原文，不带结构化 code。
+	msgErr := types.NewErrorWithStatusCode(
+		errString(message), types.ErrorCodeBadResponseBody, http.StatusBadRequest)
+	// 结构化 code 路径：消息被中转站改写只剩 code。
+	structuredErr := types.NewErrorWithStatusCode(
+		errString("subscription unavailable"), types.ErrorCodeBadResponseStatusCode, http.StatusBadRequest)
+	structuredErr.RelayError = types.OpenAIError{Code: "InvalidSubscription", Message: "subscription unavailable"}
+
+	require.True(t, loadbalancer.IsUpstreamSubscriptionInvalidError(msgErr))
+	require.True(t, loadbalancer.IsUpstreamSubscriptionInvalidError(structuredErr))
+
+	verdict := classifyAutoDisable(channelID, msgErr)
+	assert.True(t, verdict.Disable, "订阅失效是确定性失效，必须判「摘」")
+	assert.Equal(t, loadbalancer.CorroborationClassSubscription, verdict.Class)
+	assert.True(t, classifyAutoDisable(channelID, structuredErr).Disable,
+		"结构化 code 路径同样判「摘」")
+	// 摘整条渠道：账号级失效与模型无关。
+	assert.False(t, isModelScopedAutoDisable(msgErr), "订阅失效不得进 per-model 禁用")
+
+	// 渠道级分桶：证据跨模型共享。
+	ready, _ := loadbalancer.RecordAutoDisableSignal(channelID, "model-a", loadbalancer.CorroborationClassSubscription)
+	assert.False(t, ready)
+	ready, count := loadbalancer.RecordAutoDisableSignal(channelID, "model-b", loadbalancer.CorroborationClassSubscription)
+	assert.False(t, ready)
+	assert.Equal(t, 2, count, "不同模型的证据必须落进同一渠道桶")
+
+	// 完整放行链：第 3 次（仍经 classifyAutoDisable → Corroborated）达阈值。
+	assert.True(t, ShouldDisableChannelCorroborated(channelID, "model-c", msgErr),
+		"窗口内 3 次订阅失效佐证必须放行不可逆禁用")
+}
+
+// 反向守卫：瞬时限流/自愈额度类错误**不得**搭订阅失效的车进自动禁用——
+// 分支插在 IsSelfHealingQuotaError 之后，顺序错了周期性额度会被误摘。
+func TestSubscriptionInvalidBranchDoesNotHijackSelfHealing(t *testing.T) {
+	newCorroborationFixture(t, 3)
+	const channelID = 9302
+	defer loadbalancer.ResetCorroborationForChannel(channelID)
+
+	// #394 形状：免费池日额度耗尽，到点自愈。
+	daily := types.NewErrorWithStatusCode(
+		errString("The shared daily limit for the free models is exhausted (10,000,000 tokens across all free models combined). The limit resets at 00:00 Moscow time."),
+		types.ErrorCodeBadResponseBody, http.StatusTooManyRequests)
+	require.True(t, loadbalancer.IsSelfHealingQuotaError(daily))
+	assert.False(t, loadbalancer.IsUpstreamSubscriptionInvalidError(daily),
+		"日额度耗尽不是订阅失效——到点自愈，摘了等于每天人工救一次")
+	assert.False(t, classifyAutoDisable(channelID, daily).Disable)
+}

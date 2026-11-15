@@ -375,9 +375,7 @@ func IsUpstreamPermissionError(err *types.NewAPIError) bool {
 		strings.Contains(msg, "not supported by token plan") ||
 		strings.Contains(msg, "is not supported by tokenplan") ||
 		strings.Contains(msg, "is not supported by token plan") ||
-		strings.Contains(msg, "does not have a valid codingplan subscription") ||
-		strings.Contains(msg, "does not have a valid subscription") ||
-		strings.Contains(msg, "your subscription has expired") ||
+		IsUpstreamSubscriptionInvalidError(err) ||
 		strings.Contains(msg, "permission denied") ||
 		strings.Contains(msg, "permission_denied") ||
 		strings.Contains(msg, "operation not allowed") ||
@@ -421,6 +419,35 @@ func IsUpstreamPermissionError(err *types.NewAPIError) bool {
 		}
 	}
 	return false
+}
+
+// IsUpstreamSubscriptionInvalidError 判定上游订阅失效（确定性失效，不会自愈）。
+// 火山方舟 CodingPlan 过期：HTTP 400 + code=InvalidSubscription（或
+// invalid_subscription 等同族码）+ "does not have a valid (CodingPlan)
+// subscription" / "subscription has expired" 措辞。本质是渠道账号的套餐
+// 订阅问题，与 "not supported by TokenPlan" 同族——**必须人工换 key/续订
+// 才能恢复**，留在池子里等于每个请求白烧一轮换渠道重试。
+//
+// 该函数是订阅失效的唯一判定源，两处消费方复用同一实现，禁止各自抄写措辞：
+//   - 熔断侧：IsUpstreamPermissionError 归入 permission 类（可逆熔断换道）；
+//   - 自动禁用侧：service.classifyAutoDisable 归入 subscription_invalid
+//     佐证类别（不可逆摘除，阈值 3 次窗口 600s）。
+//
+// 2026-11-16 深修背景：11-15 根修（2cf92c0fb）只补了熔断分类器，自动禁用的
+// 四条判据（状态码表 401/403/404、关键词表、model_unavailable、channel_error）
+// 对 400+InvalidSubscription 全漏——渠道 #365 全天 821 次 400，永远在
+// 「熔断→冷却到期→回池→再 400」里打转，永不退池。
+func IsUpstreamSubscriptionInvalidError(err *types.NewAPIError) bool {
+	if err == nil {
+		return false
+	}
+	if isUpstreamSubscriptionInvalidCode(err) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "does not have a valid codingplan subscription") ||
+		strings.Contains(msg, "does not have a valid subscription") ||
+		strings.Contains(msg, "your subscription has expired")
 }
 
 // isUpstreamSubscriptionInvalidCode 识别上游报文里结构化的订阅失效错误码。

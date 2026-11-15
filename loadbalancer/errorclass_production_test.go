@@ -260,3 +260,40 @@ func TestInvalidSubscriptionIsPermission_Issue365(t *testing.T) {
 	assert.False(t, IsUpstreamPermissionError(newTextError("renewal reminder: subscription has expired last month, see docs", http.StatusBadRequest)))
 	assert.True(t, IsUpstreamPermissionError(newTextError("your subscription has expired", http.StatusBadRequest)))
 }
+
+// TestIsUpstreamSubscriptionInvalidError 单一判定源：熔断侧与自动禁用侧共用
+// 的订阅失效判据（2026-11-16 深修导出为公共函数）。此前措辞内联在
+// IsUpstreamPermissionError 里，自动禁用侧四条判据对 400+InvalidSubscription
+// 全漏——渠道 #365 全天 821 次 400 在「熔断→自愈→回池→再 400」里打转，
+// 永不退池。本测试钉住：函数独立可用、与 IsUpstreamPermissionError 同源、
+// 反向不误伤。
+func TestIsUpstreamSubscriptionInvalidError(t *testing.T) {
+	const message = "Your account (2130009832) does not have a valid CodingPlan subscription, or your subscription has expired. Please visit https://***.com/***/***?OpenModelVisible=false&tab=CodingPlan to review your subscription status or complete the subscription or renewal process.  Request id: 021794753211131bba9dcb446c9769753d8e06563bdd07fd0f77a"
+
+	// 生产原文（措辞路径）。
+	msgErr := newTextError(message, http.StatusBadRequest)
+	assert.True(t, IsUpstreamSubscriptionInvalidError(msgErr))
+	assert.True(t, IsUpstreamPermissionError(msgErr), "与熔断侧同源：措辞命中必须同时归入权限分类")
+
+	// 结构化 code 路径：消息可能被中转站改写，code 是更稳的信号。
+	structured := types.NewErrorWithStatusCode(errors.New("subscription unavailable"), types.ErrorCodeBadResponseStatusCode, http.StatusBadRequest)
+	structured.RelayError = types.OpenAIError{Code: "InvalidSubscription", Message: "subscription unavailable", Type: ""}
+	assert.True(t, IsUpstreamSubscriptionInvalidError(structured), "结构化 code=InvalidSubscription 必须识别")
+	assert.True(t, IsUpstreamPermissionError(structured))
+
+	snakeCode := types.NewErrorWithStatusCode(errors.New("subscription unavailable"), types.ErrorCodeBadResponseStatusCode, http.StatusBadRequest)
+	snakeCode.RelayError = types.OpenAIError{Code: "invalid_subscription", Message: "subscription unavailable"}
+	assert.True(t, IsUpstreamSubscriptionInvalidError(snakeCode))
+
+	// 反向守卫：nil、普通 400、参数错误、无主语措辞、非订阅的权限错误。
+	assert.False(t, IsUpstreamSubscriptionInvalidError(nil))
+	assert.False(t, IsUpstreamSubscriptionInvalidError(newTextError("Invalid parameter: 'temperature' must be between 0 and 2", http.StatusBadRequest)))
+	assert.False(t, IsUpstreamSubscriptionInvalidError(newTextError("subscription plan details are available at example.com", http.StatusBadRequest)))
+	assert.False(t, IsUpstreamSubscriptionInvalidError(newTextError("renewal reminder: subscription has expired last month, see docs", http.StatusBadRequest)))
+	// 无主语措辞与 group/TokenPlan 类权限错误：permission 认，subscription 不认。
+	assert.False(t, IsUpstreamSubscriptionInvalidError(newTextError("无权访问 按量分组 分组", http.StatusForbidden)))
+	permOnly := newTextError("deepseek-v4-flash is not supported by TokenPlan", http.StatusBadRequest)
+	assert.True(t, IsUpstreamPermissionError(permOnly))
+	assert.False(t, IsUpstreamSubscriptionInvalidError(permOnly),
+		"TokenPlan 不支持≠订阅过期：前者可能是模型映射配置问题，不进自动禁用")
+}

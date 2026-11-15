@@ -51,6 +51,7 @@ const (
 	CorroborationClassChannelError     = "channel_error"
 	CorroborationClassStatusCode       = "status_code"
 	CorroborationClassKeyword          = "keyword"
+	CorroborationClassSubscription     = "subscription_invalid"
 )
 
 // corroborationScopeByClass 判据类别 → 证据是否按模型分桶（true = 模型级）。
@@ -72,6 +73,11 @@ var corroborationScopeByClass = map[string]bool{
 	CorroborationClassChannelError:     false,
 	CorroborationClassStatusCode:       false,
 	CorroborationClassKeyword:          false,
+	// subscription_invalid 判定的是渠道账号的套餐订阅失效（如火山方舟
+	// CodingPlan 过期）：与 channel_error / status_code / keyword 同属账号/
+	// 凭据级事实，换订阅 key 才能恢复，禁用动作是整条渠道，证据必须落在
+	// 渠道级。
+	CorroborationClassSubscription: false,
 }
 
 // corroborationScopeModel 判定一个判据类别的证据是否按模型分桶。
@@ -223,7 +229,7 @@ func PeekAutoDisableCorroboration(channelID int, modelName, class string) bool {
 //
 // 复位按**精确键**删除而不是前缀扫描，根因是 modelName 来自客户端：模型名里
 // 只要出现一个 "|"，前缀扫就会连兄弟桶一起删（复位 "a" 会把 "a|b" 的计数也
-// 清掉）。类别既然是这四个固定值，逐个构造精确键既无歧义，也只要 4 次删除 ——
+// 清掉）。类别既然是这五个固定值，逐个构造精确键既无歧义，删除次数也有限 ——
 // 这正是它能被放进成功路径的原因：原先的全表扫描代价随注册表增长，
 // 每个成功请求都调一次是不可接受的。
 var corroborationClasses = [...]string{
@@ -231,6 +237,7 @@ var corroborationClasses = [...]string{
 	CorroborationClassChannelError,
 	CorroborationClassStatusCode,
 	CorroborationClassKeyword,
+	CorroborationClassSubscription,
 }
 
 // corroborationKey 是佐证注册表键的唯一构造处。class 恒为上述四个常量之一，
