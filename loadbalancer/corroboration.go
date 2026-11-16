@@ -240,7 +240,7 @@ var corroborationClasses = [...]string{
 	CorroborationClassSubscription,
 }
 
-// corroborationKey 是佐证注册表键的唯一构造处。class 恒为上述四个常量之一，
+// corroborationKey 是佐证注册表键的唯一构造处。class 恒为上述五个常量之一，
 // 因此键尾部的 "|class" 不可能被客户端提供的模型名伪造出来，跨 (模型, 类别)
 // 的碰撞构造不出来。
 func corroborationKey(channelID int, modelName, class string) string {
