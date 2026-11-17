@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
@@ -224,6 +225,17 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
 	logger.LogDebug(c, "upstream response body: %s", responseBody)
+	// 部分上游网关对非流式请求返回 SSE body（反滥用哨兵或强制流式），body 以 "data:" 开头
+	// 会被下方 JSON 解析报 invalid character 'd' (bad_response_body)。嗅探到 SSE 时聚合
+	// 流式 chunk 还原为非流式 JSON 再走统一解析。
+	if isSSEFormattedBody(responseBody) {
+		aggregated, aggErr := aggregateSSEAsChatCompletion(responseBody)
+		if aggErr != nil {
+			return nil, types.NewOpenAIError(aggErr, types.ErrorCodeBadResponseBody, http.StatusBadGateway)
+		}
+		logger.LogWarn(c, "upstream returned SSE body for non-stream request, aggregated %d chunk(s)", aggregated.chunkCount)
+		responseBody = aggregated.body
+	}
 	// Unmarshal to simpleResponse
 	if info.ChannelType == constant.ChannelTypeOpenRouter && info.ChannelOtherSettings.IsOpenRouterEnterprise() {
 		// 尝试解析为 openrouter enterprise
@@ -247,6 +259,12 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 
 	if oaiError := simpleResponse.GetOpenAIError(); oaiError != nil && oaiError.Type != "" {
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
+	}
+
+	// 上游反滥用哨兵以 200 + 正常 choice 形态返回（id 含 freeipblk/freeblock，内容为固定拦截
+	// 文案），既不是真实回复也不该让测活假绿。识别后按上游错误抛出，走既有熔断/failover 链。
+	if sentinelText := upstreamAntiProbeSentinelText(&simpleResponse); sentinelText != "" {
+		return nil, types.NewOpenAIError(fmt.Errorf("上游反滥用哨兵拦截: %s", sentinelText), types.ErrorCodeBadResponseBody, http.StatusBadGateway)
 	}
 
 	info.ObserveResponseModel(simpleResponse.Model)
@@ -352,4 +370,139 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 	service.IOCopyBytesGracefully(c, resp, responseBody)
 
 	return &simpleResponse.Usage, nil
+}
+
+// isSSEFormattedBody 嗅探 body 是否为 SSE 流式格式（"data:" 行）。上游网关偶发对
+// 非流式请求回 SSE（如反滥用哨兵），content-type 也不可信（实测 application/json 下
+// 仍出现 SSE body），因此以 body 前缀为准、content-type 仅作辅助信号。
+func isSSEFormattedBody(body []byte) bool {
+	trimmed := bytes.TrimLeft(body, " \t\r\n")
+	trimmed = bytes.TrimPrefix(trimmed, []byte("\xef\xbb\xbf")) // BOM
+	if bytes.HasPrefix(trimmed, []byte("data:")) || bytes.HasPrefix(trimmed, []byte("data: ")) {
+		return true
+	}
+	if bytes.HasPrefix(trimmed, []byte("event:")) || bytes.HasPrefix(trimmed, []byte("event: ")) {
+		return true
+	}
+	return false
+}
+
+type aggregatedChatCompletion struct {
+	body       []byte
+	chunkCount int
+}
+
+// aggregateSSEAsChatCompletion 把 SSE chat.completion.chunk 流聚合为等价的非流式
+// chat.completion JSON：content 按 delta 拼接、reasoning_content 取非空值、usage 取
+// 末个携带 chunk。无法解析任何 chunk 时返回错误（而非静默吞掉原始 body）。
+func aggregateSSEAsChatCompletion(body []byte) (*aggregatedChatCompletion, error) {
+	var (
+		id, model, object string
+		contentBuilder    strings.Builder
+		reasoning         *string
+		finishReason      string
+		usage             *dto.Usage
+		chunkCount        int
+		hasChunk          bool
+	)
+	for _, rawLine := range bytes.Split(body, []byte("\n")) {
+		line := strings.TrimSpace(string(rawLine))
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var chunk dto.ChatCompletionsStreamResponse
+		if err := common.Unmarshal([]byte(payload), &chunk); err != nil {
+			continue
+		}
+		chunkCount++
+		hasChunk = true
+		if chunk.Id != "" {
+			id = chunk.Id
+		}
+		if chunk.Model != "" {
+			model = chunk.Model
+		}
+		if chunk.Object != "" {
+			object = chunk.Object
+		}
+		if chunk.Usage != nil {
+			usage = chunk.Usage
+		}
+		if chunk.Error != nil {
+			continue
+		}
+		for _, choice := range chunk.Choices {
+			if choice.Delta.Content != nil {
+				contentBuilder.WriteString(*choice.Delta.Content)
+			}
+			if choice.Delta.ReasoningContent != nil {
+				reasoning = choice.Delta.ReasoningContent
+			} else if choice.Delta.Reasoning != nil && reasoning == nil {
+				reasoning = choice.Delta.Reasoning
+			}
+			if choice.FinishReason != nil && *choice.FinishReason != "" {
+				finishReason = *choice.FinishReason
+			}
+		}
+	}
+	if !hasChunk {
+		return nil, fmt.Errorf("上游返回 SSE body 但无可解析的 data chunk（前 120 字节: %.120s）", string(body))
+	}
+
+	completion := dto.OpenAITextResponse{
+		Id:      id,
+		Object:  object,
+		Model:   model,
+		Choices: []dto.OpenAITextResponseChoice{{FinishReason: finishReason}},
+	}
+	if usage != nil {
+		completion.Usage = *usage
+	}
+	msg := dto.Message{Role: "assistant", Content: contentBuilder.String()}
+	if reasoning != nil {
+		msg.ReasoningContent = reasoning
+	}
+	completion.Choices[0].Message = msg
+	encoded, err := common.Marshal(completion)
+	if err != nil {
+		return nil, err
+	}
+	return &aggregatedChatCompletion{body: encoded, chunkCount: chunkCount}, nil
+}
+
+// upstreamAntiProbeSentinelIDMarkers 是已实证的上游反滥用哨兵 id 标记（免费池对探针
+// 返回 200 + 固定文案的伪正常回复）：freeipblk = IP 级临时限制，freeblock = 客户端
+// 指纹级拦截。id 是精确判别式，正文标记仅在小额 usage 时兜底防漏。
+const (
+	upstreamSentinelIDMarkerIP  = "freeipblk"
+	upstreamSentinelIDMarkerKey = "freeblock"
+	upstreamSentinelContentMark = "已被临时限制访问"
+)
+
+func upstreamAntiProbeSentinelText(resp *dto.OpenAITextResponse) string {
+	if resp == nil {
+		return ""
+	}
+	if strings.Contains(resp.Id, upstreamSentinelIDMarkerIP) || strings.Contains(resp.Id, upstreamSentinelIDMarkerKey) {
+		for _, choice := range resp.Choices {
+			if content := choice.Message.StringContent(); content != "" {
+				return content
+			}
+		}
+		return "(哨兵未携带正文)"
+	}
+	// 无哨兵 id 时要求正文精确匹配拦截文案且 usage 极小，避免误伤正常模型输出。
+	if resp.Usage.TotalTokens > 2 {
+		return ""
+	}
+	for _, choice := range resp.Choices {
+		if strings.Contains(choice.Message.StringContent(), upstreamSentinelContentMark) {
+			return choice.Message.StringContent()
+		}
+	}
+	return ""
 }
