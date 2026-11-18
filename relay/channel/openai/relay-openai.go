@@ -393,18 +393,36 @@ type aggregatedChatCompletion struct {
 }
 
 // aggregateSSEAsChatCompletion 把 SSE chat.completion.chunk 流聚合为等价的非流式
-// chat.completion JSON：content 按 delta 拼接、reasoning_content 取非空值、usage 取
-// 末个携带 chunk。无法解析任何 chunk 时返回错误（而非静默吞掉原始 body）。
+// chat.completion JSON：choice 按 index 分桶，content 按 delta 拼接、tool_calls 按
+// index 增量合并（流式函数调用分片到完整调用）、reasoning_content 取非空值、usage
+// 取末个携带 chunk。object 硬编码 "chat.completion"（chunk 的 object 值不透传，
+// 严格客户端如 Zod/Vercel AI SDK 会校验该字段）。无法解析任何 chunk 时返回错误
+// （而非静默吞掉原始 body）。
 func aggregateSSEAsChatCompletion(body []byte) (*aggregatedChatCompletion, error) {
+	type choiceAgg struct {
+		content      strings.Builder
+		reasoning    *string
+		finishReason string
+		toolCalls    map[int]*dto.ToolCallResponse
+		toolOrder    []int
+	}
+	choices := make(map[int]*choiceAgg)
+	var choiceOrder []int
 	var (
-		id, model, object string
-		contentBuilder    strings.Builder
-		reasoning         *string
-		finishReason      string
-		usage             *dto.Usage
-		chunkCount        int
-		hasChunk          bool
+		id, model  string
+		usage      *dto.Usage
+		chunkCount int
+		hasChunk   bool
 	)
+	choiceBucket := func(index int) *choiceAgg {
+		bucket, ok := choices[index]
+		if !ok {
+			bucket = &choiceAgg{toolCalls: make(map[int]*dto.ToolCallResponse)}
+			choices[index] = bucket
+			choiceOrder = append(choiceOrder, index)
+		}
+		return bucket
+	}
 	for _, rawLine := range bytes.Split(body, []byte("\n")) {
 		line := strings.TrimSpace(string(rawLine))
 		if !strings.HasPrefix(line, "data:") {
@@ -426,9 +444,6 @@ func aggregateSSEAsChatCompletion(body []byte) (*aggregatedChatCompletion, error
 		if chunk.Model != "" {
 			model = chunk.Model
 		}
-		if chunk.Object != "" {
-			object = chunk.Object
-		}
 		if chunk.Usage != nil {
 			usage = chunk.Usage
 		}
@@ -436,16 +451,41 @@ func aggregateSSEAsChatCompletion(body []byte) (*aggregatedChatCompletion, error
 			continue
 		}
 		for _, choice := range chunk.Choices {
+			bucket := choiceBucket(choice.Index)
 			if choice.Delta.Content != nil {
-				contentBuilder.WriteString(*choice.Delta.Content)
+				bucket.content.WriteString(*choice.Delta.Content)
 			}
 			if choice.Delta.ReasoningContent != nil {
-				reasoning = choice.Delta.ReasoningContent
-			} else if choice.Delta.Reasoning != nil && reasoning == nil {
-				reasoning = choice.Delta.Reasoning
+				bucket.reasoning = choice.Delta.ReasoningContent
+			} else if choice.Delta.Reasoning != nil && bucket.reasoning == nil {
+				bucket.reasoning = choice.Delta.Reasoning
 			}
 			if choice.FinishReason != nil && *choice.FinishReason != "" {
-				finishReason = *choice.FinishReason
+				bucket.finishReason = *choice.FinishReason
+			}
+			for _, tc := range choice.Delta.ToolCalls {
+				idx := 0
+				if tc.Index != nil {
+					idx = *tc.Index
+				}
+				existing, ok := bucket.toolCalls[idx]
+				if !ok {
+					clone := tc
+					clone.Index = nil // 非流式 tool_calls 不携带 index 字段
+					bucket.toolCalls[idx] = &clone
+					bucket.toolOrder = append(bucket.toolOrder, idx)
+					continue
+				}
+				// 增量分片：id/name 首块已带，arguments 逐块追加
+				if tc.ID != "" {
+					existing.ID = tc.ID
+				}
+				if tc.Function.Name != "" {
+					existing.Function.Name = tc.Function.Name
+				}
+				if tc.Function.Arguments != "" {
+					existing.Function.Arguments += tc.Function.Arguments
+				}
 			}
 		}
 	}
@@ -454,19 +494,32 @@ func aggregateSSEAsChatCompletion(body []byte) (*aggregatedChatCompletion, error
 	}
 
 	completion := dto.OpenAITextResponse{
-		Id:      id,
-		Object:  object,
-		Model:   model,
-		Choices: []dto.OpenAITextResponseChoice{{FinishReason: finishReason}},
+		Id:     id,
+		Object: "chat.completion",
+		Model:  model,
+	}
+	for _, index := range choiceOrder {
+		bucket := choices[index]
+		msg := dto.Message{Role: "assistant", Content: bucket.content.String()}
+		if bucket.reasoning != nil {
+			msg.ReasoningContent = bucket.reasoning
+		}
+		if len(bucket.toolOrder) > 0 {
+			toolCalls := make([]dto.ToolCallResponse, 0, len(bucket.toolOrder))
+			for _, idx := range bucket.toolOrder {
+				toolCalls = append(toolCalls, *bucket.toolCalls[idx])
+			}
+			msg.SetToolCalls(toolCalls)
+		}
+		completion.Choices = append(completion.Choices, dto.OpenAITextResponseChoice{
+			Index:        index,
+			FinishReason: bucket.finishReason,
+			Message:      msg,
+		})
 	}
 	if usage != nil {
 		completion.Usage = *usage
 	}
-	msg := dto.Message{Role: "assistant", Content: contentBuilder.String()}
-	if reasoning != nil {
-		msg.ReasoningContent = reasoning
-	}
-	completion.Choices[0].Message = msg
 	encoded, err := common.Marshal(completion)
 	if err != nil {
 		return nil, err
@@ -495,8 +548,9 @@ func upstreamAntiProbeSentinelText(resp *dto.OpenAITextResponse) string {
 		}
 		return "(哨兵未携带正文)"
 	}
-	// 无哨兵 id 时要求正文精确匹配拦截文案且 usage 极小，避免误伤正常模型输出。
-	if resp.Usage.TotalTokens > 2 {
+	// 无哨兵 id 时要求正文匹配拦截文案且上游上报的 usage 极小非零，避免误伤正常模型
+	// 输出（上游省略 usage 时 TotalTokens=0，门槛失效，此时只信 id 判别式）。
+	if resp.Usage.TotalTokens == 0 || resp.Usage.TotalTokens > 2 {
 		return ""
 	}
 	for _, choice := range resp.Choices {

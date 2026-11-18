@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dengyie/apihub/common"
 	relaycommon "github.com/dengyie/apihub/relay/common"
 	"github.com/dengyie/apihub/relaykit/dto"
 	"github.com/gin-gonic/gin"
@@ -93,6 +94,83 @@ func TestUpstreamAntiProbeSentinelTextDiscriminators(t *testing.T) {
 	// 正文标记 + 小 usage → 拦截兜底
 	resp = &dto.OpenAITextResponse{Id: "resp_x", Usage: dto.Usage{TotalTokens: 1}, Choices: []dto.OpenAITextResponseChoice{{Message: dto.Message{Role: "assistant", Content: "当前网络的请求存在异常，已被临时限制访问，请稍后再试。"}}}}
 	assert.Contains(t, upstreamAntiProbeSentinelText(resp), "已被临时限制访问")
+	// 正文标记但 usage 缺省（TotalTokens=0）→ 不拦截：上游省略 usage 时只信 id 判别式
+	resp = &dto.OpenAITextResponse{Id: "resp_y", Choices: []dto.OpenAITextResponseChoice{{Message: dto.Message{Role: "assistant", Content: "当前网络的请求存在异常，已被临时限制访问，请稍后再试。"}}}}
+	assert.Equal(t, "", upstreamAntiProbeSentinelText(resp))
+}
+
+func TestAggregateSSEToolCallsAndMultiChoice(t *testing.T) {
+	// 流式 tool_calls 增量分片 + 双 choice 分桶聚合（review P2/P3 修复的行为锁定）。
+	// chunk 用结构体 marshal 生成，避免手写嵌套转义出错。
+	chunkLines := func(tcs [][]dto.ToolCallResponse, extraChoices ...dto.ChatCompletionsStreamResponseChoice) string {
+		choices := make([]dto.ChatCompletionsStreamResponseChoice, 0, len(tcs)+len(extraChoices))
+		for _, tc := range tcs {
+			choices = append(choices, dto.ChatCompletionsStreamResponseChoice{Delta: dto.ChatCompletionsStreamResponseChoiceDelta{ToolCalls: tc}})
+		}
+		choices = append(choices, extraChoices...)
+		chunk, err := common.Marshal(dto.ChatCompletionsStreamResponse{Id: "resp_tc", Object: "chat.completion.chunk", Model: "m1", Choices: choices})
+		require.NoError(t, err)
+		return "data: " + string(chunk) + "\n\n"
+	}
+	intPtr := func(i int) *int { return &i }
+	strPtr := func(s string) *string { return &s }
+
+	body := chunkLines([][]dto.ToolCallResponse{{
+		{Index: intPtr(0), ID: "call_a", Type: "function", Function: dto.FunctionResponse{Name: "get_weather"}},
+	}}, dto.ChatCompletionsStreamResponseChoice{Index: 1, Delta: dto.ChatCompletionsStreamResponseChoiceDelta{Role: "assistant", Content: strPtr("B-choice")}}) +
+		chunkLines([][]dto.ToolCallResponse{{
+			{Index: intPtr(0), Function: dto.FunctionResponse{Arguments: "{\"city\":"}},
+		}}) +
+		chunkLines(nil, dto.ChatCompletionsStreamResponseChoice{Index: 0, Delta: dto.ChatCompletionsStreamResponseChoiceDelta{Content: strPtr("A-choice")}}) +
+		chunkLines([][]dto.ToolCallResponse{{
+			{Index: intPtr(0), Function: dto.FunctionResponse{Arguments: "33}"}},
+		}}, dto.ChatCompletionsStreamResponseChoice{Index: 0, FinishReason: strPtr("tool_calls")}) +
+		chunkLines(nil, dto.ChatCompletionsStreamResponseChoice{Index: 1, FinishReason: strPtr("stop")}) +
+		"data: [DONE]\n\n"
+
+	agg, err := aggregateSSEAsChatCompletion([]byte(body))
+	require.NoError(t, err)
+	var out dto.OpenAITextResponse
+	require.NoError(t, common.Unmarshal(agg.body, &out))
+	// object 硬编码为非流式形态，chunk 值不透传（review P2 修复锁定）
+	assert.Equal(t, "chat.completion", out.Object)
+	require.Len(t, out.Choices, 2)
+
+	choice0 := out.Choices[0]
+	assert.Equal(t, 0, choice0.Index)
+	assert.Equal(t, "A-choice", choice0.Message.StringContent())
+	assert.Equal(t, "tool_calls", choice0.FinishReason)
+	parsed := choice0.Message.ParseToolCalls()
+	require.Len(t, parsed, 1)
+	assert.Equal(t, "get_weather", parsed[0].Function.Name)
+	assert.JSONEq(t, "{\"city\":33}", parsed[0].Function.Arguments)
+
+	choice1 := out.Choices[1]
+	assert.Equal(t, 1, choice1.Index)
+	assert.Equal(t, "B-choice", choice1.Message.StringContent())
+	assert.Equal(t, "stop", choice1.FinishReason)
+}
+
+func TestAggregateSSESkipsErrorChunks(t *testing.T) {
+	// error chunk 不贡献内容，但流仍正常聚合（chunk.Error 分支行为锁定）
+	body := "data: {\"id\":\"resp_err\",\"object\":\"chat.completion.chunk\",\"model\":\"m1\",\"error\":{\"message\":\"boom\",\"type\":\"server_error\"}}\n\n" +
+		"data: {\"id\":\"resp_err\",\"object\":\"chat.completion.chunk\",\"model\":\"m1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: [DONE]\n\n"
+
+	agg, err := aggregateSSEAsChatCompletion([]byte(body))
+	require.NoError(t, err)
+	var out dto.OpenAITextResponse
+	require.NoError(t, common.Unmarshal(agg.body, &out))
+	require.Len(t, out.Choices, 1)
+	assert.Equal(t, "ok", out.Choices[0].Message.StringContent())
+}
+
+func TestAggregateSSEUnparseableBodyFails(t *testing.T) {
+	// data: 行存在但全部不可解析 → 显式报错而非静默吞掉
+	agg, err := aggregateSSEAsChatCompletion([]byte("data: not-json\n\ndata: [DONE]\n\n"))
+	require.Error(t, err)
+	require.Nil(t, agg)
+	assert.Contains(t, err.Error(), "无可解析的 data chunk")
 }
 
 func TestIsSSEFormattedBody(t *testing.T) {
