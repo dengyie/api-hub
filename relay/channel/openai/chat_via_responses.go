@@ -34,8 +34,10 @@ func OaiResponsesToChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
 
-	// 上游对非流式请求回 SSE body（强转流式/哨兵）时先聚合还原再解析。
-	restoredBody, apiErr := guardNonStreamUpstreamBody(c, body, "chat")
+	// 上游对非流式 Responses 请求回 SSE body（强转流式/哨兵）时先从终态事件还原再解析。
+	// 注意上游协议是 Responses：必须用 "responses" 抽取路径，chat 聚合器解析不了
+	// response.completed 事件。
+	restoredBody, apiErr := guardNonStreamUpstreamBody(c, body, "responses")
 	if apiErr != nil {
 		return nil, apiErr
 	}

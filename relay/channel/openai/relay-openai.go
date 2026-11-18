@@ -55,7 +55,7 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 		// 流式哨兵检测：哨兵 chunk 同样以数据帧送达（id 含 freeipblk/freeblock）。
 		// 不拦截会把固定拦截文案当助手回复透传给客户端并照常计费。仅在尚未向客户
 		// 端下发任何数据帧时判定（此时中断无计费副作用），命中即终止走 failover。
-		if !c.Writer.Written() && info.ReceivedVisibleContentBytes == 0 {
+		if c != nil && c.Writer != nil && !c.Writer.Written() && info.ReceivedVisibleContentBytes == 0 {
 			if sentinelText := streamSentinelText(data); sentinelText != "" {
 				logger.LogWarn(c, "upstream anti-probe sentinel detected in stream, aborting: %s", sentinelText)
 				sr.Stop(types.NewOpenAIError(fmt.Errorf("上游反滥用哨兵拦截: %s", sentinelText), types.ErrorCodeUpstreamSentinelBlocked, http.StatusBadGateway))

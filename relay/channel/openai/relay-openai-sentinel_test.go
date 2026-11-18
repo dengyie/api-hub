@@ -334,23 +334,39 @@ func TestResponsesAntiProbeSentinelTextDiscriminators(t *testing.T) {
 
 func TestViaChatHandlersSentinelAndSSE(t *testing.T) {
 	// P2 锁定：两条 via_chat 非流式路径对 SSE body 与哨兵的防护。
-	// 1) responses_via_chat（chat 客户端）：SSE body 聚合 + 哨兵错误码
+	// 1) OaiChatToResponsesHandler（responses_via_chat.go，上游 chat 协议）：
+	//    chat chunk SSE 哨兵流 → 聚合 + 哨兵错误码
 	sentinelSSE := "data: {\"id\":\"chatcmpl-freeipblk000\",\"object\":\"chat.completion.chunk\",\"model\":\"m1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"当前网络的请求存在异常，已被临时限制访问，请稍后再试。\"},\"finish_reason\":\"stop\"}]}\n\n" +
 		"data: [DONE]\n\n"
 	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(sentinelSSE)), Header: http.Header{"Content-Type": []string{"application/json"}}}
 	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}, IsStream: false, RelayFormat: types.RelayFormatOpenAIResponses}
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
-	usage, apiErr := OaiResponsesToChatHandler(c, info, resp)
+	usage, apiErr := OaiChatToResponsesHandler(c, info, resp)
 	require.Nil(t, usage)
 	require.NotNil(t, apiErr)
 	assert.Equal(t, types.ErrorCodeUpstreamSentinelBlocked, apiErr.GetErrorCode())
 
-	// 2) chat_via_responses（responses 上游 → chat 客户端）：JSON 哨兵假绿修复
+	// 2) OaiChatToResponsesHandler：JSON 哨兵假绿修复
 	sentinelJSON := "{\"id\":\"resp_freeipblk000\",\"object\":\"chat.completion\",\"model\":\"m1\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"当前网络的请求存在异常，已被临时限制访问，请稍后再试。\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":13,\"completion_tokens\":1,\"total_tokens\":14}}"
 	resp = &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(sentinelJSON)), Header: http.Header{"Content-Type": []string{"application/json"}}}
 	info = &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}, IsStream: false, RelayFormat: types.RelayFormatOpenAI}
 	c, _ = gin.CreateTestContext(httptest.NewRecorder())
 	usage, apiErr = OaiChatToResponsesHandler(c, info, resp)
+	require.Nil(t, usage)
+	require.NotNil(t, apiErr)
+	assert.Equal(t, types.ErrorCodeUpstreamSentinelBlocked, apiErr.GetErrorCode())
+
+	// 3) OaiResponsesToChatHandler（chat_via_responses.go，上游 Responses 协议）
+	//    回 Responses SSE body：必须走 responses 抽取路径还原终态事件
+	//    （锁定 format 参数——传 "chat" 会把 response.completed 事件喂给
+	//    chat 聚合器，还原为空 body 而漏判）
+	responsesSSE := "event: response.completed\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_freeipblk000\",\"model\":\"m1\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"当前网络的请求存在异常，已被临时限制访问，请稍后再试。\"}]}],\"usage\":{\"prompt_tokens\":13,\"completion_tokens\":1,\"total_tokens\":14}}}\n\n" +
+		"data: [DONE]\n\n"
+	resp = &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(responsesSSE)), Header: http.Header{"Content-Type": []string{"text/event-stream"}}}
+	info = &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}, IsStream: false, RelayFormat: types.RelayFormatOpenAI}
+	c, _ = gin.CreateTestContext(httptest.NewRecorder())
+	usage, apiErr = OaiResponsesToChatHandler(c, info, resp)
 	require.Nil(t, usage)
 	require.NotNil(t, apiErr)
 	assert.Equal(t, types.ErrorCodeUpstreamSentinelBlocked, apiErr.GetErrorCode())
