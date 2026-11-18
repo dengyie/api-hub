@@ -28,12 +28,22 @@ func OaiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
+	// 上游对非流式 Responses 请求同样可能回 SSE body（强转流式/哨兵），嗅探还原后再解析。
+	restoredBody, apiErr := guardNonStreamUpstreamBody(c, responseBody, "responses")
+	if apiErr != nil {
+		return nil, apiErr
+	}
+	responseBody = restoredBody
 	err = common.Unmarshal(responseBody, &responsesResponse)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
 	if oaiError := responsesResponse.GetOpenAIError(); oaiError != nil && oaiError.Type != "" {
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
+	}
+	// 反滥用哨兵判别：Responses 形态的哨兵 id 同样带 freeipblk/freeblock 标记。
+	if sentinelText := responsesAntiProbeSentinelText(&responsesResponse); sentinelText != "" {
+		return nil, types.NewOpenAIError(fmt.Errorf("上游反滥用哨兵拦截: %s", sentinelText), types.ErrorCodeUpstreamSentinelBlocked, http.StatusBadGateway)
 	}
 
 	info.ObserveResponseModel(responsesResponse.Model)

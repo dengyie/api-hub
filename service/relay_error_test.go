@@ -163,6 +163,10 @@ func TestDecideRelayRetryReasons(t *testing.T) {
 		// status_code_ranges.go 的注释）：慢上游网关超时改为换渠道故障转移。
 		{name: "upstream gateway timeout 504 retries", err: upstream(http.StatusGatewayTimeout), retries: 1, want: PolicyDecision{Action: "retry", Reason: "retry_status_matched", Source: "global"}},
 		{name: "success status never retries", err: upstream(http.StatusOK), retries: 1, want: PolicyDecision{Action: "stop", Reason: "system_retry_exclusion", Source: "system"}},
+		// 哨兵拦截（200 + 伪正常回复）携带专属错误码：必须先于 2xx 排除与
+		// alwaysSkipCodes 闸门换渠道重试（哨兵形态同时满足两种拦截，闸门后即死代码）。
+		{name: "upstream sentinel blocked on 200 retries", err: types.NewOpenAIError(errors.New("上游反滥用哨兵拦截: 当前网络的请求存在异常，已被临时限制访问"), types.ErrorCodeUpstreamSentinelBlocked, http.StatusBadGateway), retries: 1, want: PolicyDecision{Action: "retry", Reason: "upstream_sentinel_blocked", Source: "loadbalancer"}},
+		{name: "upstream sentinel blocked respects budget", err: types.NewOpenAIError(errors.New("上游反滥用哨兵拦截"), types.ErrorCodeUpstreamSentinelBlocked, http.StatusBadGateway), retries: 0, want: PolicyDecision{Action: "stop", Reason: "attempt_budget_exhausted", Source: "global"}},
 		{name: "skip retry error", err: types.NewErrorWithStatusCode(errors.New("local"), types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry()), retries: 1, want: PolicyDecision{Action: "stop", Reason: "non_retryable_error", Source: "system"}},
 		// 本地计费错误（用户自身欠费 403）带 skipRetry 标记，必须先于权限
 		// 启发式：否则 "403 即上游权限错误" 会把本地 403 反复换渠道重试，

@@ -120,6 +120,16 @@ func TestClassifyBreakerEffectMatchesRetryClassification(t *testing.T) {
 			want:      BreakerRateLimit,
 			wantRetry: "retry",
 		},
+		{
+			// 哨兵拦截（2026-11-18 kunyou 免费池生产形态）：专属错误码保证
+			// BreakerSentinel（no-op）而非 BreakerRelay/None 分叉，且换渠道重试。
+			name:      "upstream anti-probe sentinel (kunyou)",
+			message:   "上游反滥用哨兵拦截: 当前网络的请求存在异常，已被临时限制访问，请稍后再试。",
+			code:      types.ErrorCodeUpstreamSentinelBlocked,
+			status:    http.StatusBadGateway,
+			want:      BreakerSentinel,
+			wantRetry: "retry",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

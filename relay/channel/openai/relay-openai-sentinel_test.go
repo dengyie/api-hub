@@ -10,6 +10,7 @@ import (
 	"github.com/dengyie/apihub/common"
 	relaycommon "github.com/dengyie/apihub/relay/common"
 	"github.com/dengyie/apihub/relaykit/dto"
+	"github.com/dengyie/apihub/relaykit/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -19,6 +20,9 @@ func newRecorder(t *testing.T) *httptest.ResponseRecorder {
 	t.Helper()
 	return httptest.NewRecorder()
 }
+
+func intPtr(i int) *int { return &i }
+func strPtr(s string) *string { return &s }
 
 // 上游反滥用哨兵实测形态（2026-11-18 kunyou 免费池）：
 // 非流式请求有时收到 SSE body（data: chunk，id=chatcmpl-freeipblk...），
@@ -112,8 +116,6 @@ func TestAggregateSSEToolCallsAndMultiChoice(t *testing.T) {
 		require.NoError(t, err)
 		return "data: " + string(chunk) + "\n\n"
 	}
-	intPtr := func(i int) *int { return &i }
-	strPtr := func(s string) *string { return &s }
 
 	body := chunkLines([][]dto.ToolCallResponse{{
 		{Index: intPtr(0), ID: "call_a", Type: "function", Function: dto.FunctionResponse{Name: "get_weather"}},
@@ -181,4 +183,183 @@ func TestIsSSEFormattedBody(t *testing.T) {
 	assert.False(t, isSSEFormattedBody([]byte("{\"id\":\"resp_1\"}")))
 	assert.False(t, isSSEFormattedBody([]byte("")))
 	assert.False(t, isSSEFormattedBody([]byte("data {")))
+}
+
+func TestOpenaiHandlerSentinelUsesDedicatedErrorCode(t *testing.T) {
+	// P1 锁定：哨兵错误必须携带专属错误码 upstream_sentinel_blocked（不再
+	// 落 alwaysSkipCodes 集合里的 bad_response_body），让 DecideRelayRetry
+	// 换渠道重试、ClassifyBreakerEffect 归 BreakerSentinel。
+	jsonBody := "{\"id\":\"resp_freeipblk00000000000000000\",\"object\":\"chat.completion\",\"model\":\"deepseek-v4.1-flash-1017\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"当前网络的请求存在异常，已被临时限制访问，请稍后再试。\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":13,\"completion_tokens\":1,\"total_tokens\":14}}"
+
+	c, resp, info := newNonStreamResponse(t, jsonBody)
+	usage, apiErr := OpenaiHandler(c, info, resp)
+	require.NotNil(t, apiErr)
+	require.Nil(t, usage)
+	assert.Equal(t, types.ErrorCodeUpstreamSentinelBlocked, apiErr.GetErrorCode())
+	assert.True(t, types.IsUpstreamSentinelBlocked(apiErr))
+}
+
+func TestAggregateSSEPropagatesErrorChunk(t *testing.T) {
+	// P2 锁定：error chunk 透传进聚合体 Error 字段，下游 GetOpenAIError 统一拦截；
+	// error chunk 不计入 chunkCount。
+	body := "data: {\"id\":\"resp_err\",\"object\":\"chat.completion.chunk\",\"model\":\"m1\",\"error\":{\"message\":\"boom\",\"type\":\"server_error\",\"code\":\"x\"}}\n\n" +
+		"data: {\"id\":\"resp_err\",\"object\":\"chat.completion.chunk\",\"model\":\"m1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n" +
+		"data: [DONE]\n\n"
+
+	agg, err := aggregateSSEAsChatCompletion([]byte(body))
+	require.NoError(t, err)
+	assert.Equal(t, 1, agg.chunkCount, "error chunk 不计入 chunkCount")
+	var out dto.OpenAITextResponse
+	require.NoError(t, common.Unmarshal(agg.body, &out))
+	oaiErr := out.GetOpenAIError()
+	require.NotNil(t, oaiErr)
+	assert.Equal(t, "boom", oaiErr.Message)
+}
+
+func TestOpenaiHandlerAllErrorChunkStreamNotFakeGreen(t *testing.T) {
+	// P2 锁定：整条流只有 error chunk 时不得变成 200 空响应计费成功。
+	body := "data: {\"id\":\"resp_err\",\"object\":\"chat.completion.chunk\",\"model\":\"m1\",\"error\":{\"message\":\"quota exceeded\",\"type\":\"insufficient_quota\",\"code\":\"insufficient_quota\"}}\n\n" +
+		"data: [DONE]\n\n"
+
+	c, resp, info := newNonStreamResponse(t, body)
+	usage, apiErr := OpenaiHandler(c, info, resp)
+	require.Nil(t, usage, "全错误流不应被当成功计费")
+	require.NotNil(t, apiErr)
+	assert.Contains(t, apiErr.Error(), "quota exceeded")
+}
+
+func TestAggregateSSEReasoningAccumulates(t *testing.T) {
+	// P2 锁定：reasoning_content 逐 chunk 增量累加（覆盖语义只会留下最后一个片段）。
+	chunkLines := func(reasonings ...string) string {
+		var sb strings.Builder
+		for _, r := range reasonings {
+			chunk, err := common.Marshal(dto.ChatCompletionsStreamResponse{
+				Id: "resp_rs", Object: "chat.completion.chunk", Model: "m1",
+				Choices: []dto.ChatCompletionsStreamResponseChoice{{
+					Index: 0,
+					Delta: dto.ChatCompletionsStreamResponseChoiceDelta{ReasoningContent: &r},
+				}},
+			})
+			require.NoError(t, err)
+			sb.WriteString("data: " + string(chunk) + "\n\n")
+		}
+		done, err := common.Marshal(dto.ChatCompletionsStreamResponse{
+			Id: "resp_rs", Object: "chat.completion.chunk", Model: "m1",
+			Choices: []dto.ChatCompletionsStreamResponseChoice{{Index: 0, FinishReason: strPtr("stop")}},
+		})
+		require.NoError(t, err)
+		sb.WriteString("data: " + string(done) + "\n\ndata: [DONE]\n\n")
+		return sb.String()
+	}
+
+	agg, err := aggregateSSEAsChatCompletion([]byte(chunkLines("思考第一段。", "思考第二段。")))
+	require.NoError(t, err)
+	var out dto.OpenAITextResponse
+	require.NoError(t, common.Unmarshal(agg.body, &out))
+	require.Len(t, out.Choices, 1)
+	assert.Equal(t, "思考第一段。思考第二段。", out.Choices[0].Message.GetReasoningContent())
+}
+
+func TestResponsesHandlerSSEBodyExtractsCompletedEvent(t *testing.T) {
+	// P2 锁定：非流式 Responses 收到 SSE body 时从终态事件抽取 response 还原。
+	sseBody := "event: response.created\n" +
+		"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_x\",\"model\":\"m1\"}}\n\n" +
+		"event: response.completed\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_x\",\"model\":\"m1\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"pong\"}]}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":1,\"total_tokens\":6}}}\n\n" +
+		"data: [DONE]\n\n"
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(sseBody)),
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+	}
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}, IsStream: false}
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+
+	usage, apiErr := OaiResponsesHandler(c, info, resp)
+	require.Nil(t, apiErr)
+	require.NotNil(t, usage)
+	assert.Equal(t, 6, usage.TotalTokens)
+}
+
+func TestResponsesHandlerSentinelReturnsError(t *testing.T) {
+	// P2 锁定：Responses 形态哨兵（id 含 freeipblk）不得假绿，须携带专属错误码。
+	jsonBody := "{\"id\":\"resp_freeipblk00000000000000000\",\"model\":\"m1\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"当前网络的请求存在异常，已被临时限制访问，请稍后再试。\"}]}],\"usage\":{\"prompt_tokens\":13,\"completion_tokens\":1,\"total_tokens\":14}}"
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(jsonBody)),
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+	}
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}, IsStream: false}
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+
+	usage, apiErr := OaiResponsesHandler(c, info, resp)
+	require.Nil(t, usage)
+	require.NotNil(t, apiErr)
+	assert.Equal(t, types.ErrorCodeUpstreamSentinelBlocked, apiErr.GetErrorCode())
+}
+
+func TestResponsesAntiProbeSentinelTextDiscriminators(t *testing.T) {
+	// id 命中即拦截（output[].content[].text 抽取正文）
+	resp := &dto.OpenAIResponsesResponse{
+		ID: "resp_freeblock000",
+		Output: []dto.ResponsesOutput{{
+			Type:    "message",
+			Content: []dto.ResponsesOutputContent{{Type: "output_text", Text: "拦截文案"}},
+		}},
+	}
+	assert.Equal(t, "拦截文案", responsesAntiProbeSentinelText(resp))
+	// usage 缺省/过大 → 只信 id 判别式
+	resp = &dto.OpenAIResponsesResponse{
+		ID:    "resp_normal",
+		Usage: &dto.Usage{TotalTokens: 100},
+		Output: []dto.ResponsesOutput{{
+			Type:    "message",
+			Content: []dto.ResponsesOutputContent{{Type: "output_text", Text: "聊聊「已被临时限制访问」这个词"}},
+		}},
+	}
+	assert.Equal(t, "", responsesAntiProbeSentinelText(resp))
+	// 小 usage + 正文标记 → 兜底拦截
+	resp = &dto.OpenAIResponsesResponse{
+		ID:    "resp_x",
+		Usage: &dto.Usage{TotalTokens: 1},
+		Output: []dto.ResponsesOutput{{
+			Type:    "message",
+			Content: []dto.ResponsesOutputContent{{Type: "output_text", Text: "当前网络的请求存在异常，已被临时限制访问，请稍后再试。"}},
+		}},
+	}
+	assert.Contains(t, responsesAntiProbeSentinelText(resp), "已被临时限制访问")
+}
+
+func TestViaChatHandlersSentinelAndSSE(t *testing.T) {
+	// P2 锁定：两条 via_chat 非流式路径对 SSE body 与哨兵的防护。
+	// 1) responses_via_chat（chat 客户端）：SSE body 聚合 + 哨兵错误码
+	sentinelSSE := "data: {\"id\":\"chatcmpl-freeipblk000\",\"object\":\"chat.completion.chunk\",\"model\":\"m1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"当前网络的请求存在异常，已被临时限制访问，请稍后再试。\"},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: [DONE]\n\n"
+	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(sentinelSSE)), Header: http.Header{"Content-Type": []string{"application/json"}}}
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}, IsStream: false, RelayFormat: types.RelayFormatOpenAIResponses}
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	usage, apiErr := OaiResponsesToChatHandler(c, info, resp)
+	require.Nil(t, usage)
+	require.NotNil(t, apiErr)
+	assert.Equal(t, types.ErrorCodeUpstreamSentinelBlocked, apiErr.GetErrorCode())
+
+	// 2) chat_via_responses（responses 上游 → chat 客户端）：JSON 哨兵假绿修复
+	sentinelJSON := "{\"id\":\"resp_freeipblk000\",\"object\":\"chat.completion\",\"model\":\"m1\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"当前网络的请求存在异常，已被临时限制访问，请稍后再试。\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":13,\"completion_tokens\":1,\"total_tokens\":14}}"
+	resp = &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(sentinelJSON)), Header: http.Header{"Content-Type": []string{"application/json"}}}
+	info = &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}, IsStream: false, RelayFormat: types.RelayFormatOpenAI}
+	c, _ = gin.CreateTestContext(httptest.NewRecorder())
+	usage, apiErr = OaiChatToResponsesHandler(c, info, resp)
+	require.Nil(t, usage)
+	require.NotNil(t, apiErr)
+	assert.Equal(t, types.ErrorCodeUpstreamSentinelBlocked, apiErr.GetErrorCode())
+}
+
+func TestStreamSentinelTextDiscriminators(t *testing.T) {
+	// P3 锁定：流式哨兵只信 id 判别式，正文标记不参与（无小 usage 门槛可用）。
+	assert.Contains(t, streamSentinelText("{\"id\":\"chatcmpl-freeipblk0\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"拦截文案\"}}]}"), "拦截文案")
+	assert.Equal(t, "(哨兵未携带正文)", streamSentinelText("{\"id\":\"chatcmpl-freeblock0\",\"choices\":[]}"))
+	assert.Equal(t, "", streamSentinelText("{\"id\":\"chatcmpl-normal\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"已被临时限制访问\"}}]}"))
+	assert.Equal(t, "", streamSentinelText("not json"))
 }

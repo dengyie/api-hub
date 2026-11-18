@@ -38,6 +38,9 @@ const (
 	BreakerResponsesAPINotSupported BreakerEffectType = "responses_api_not_supported"
 	BreakerPermission               BreakerEffectType = "permission"
 	BreakerRelay                    BreakerEffectType = "relay"
+	// BreakerSentinel：上游反滥用哨兵拦截。no-op 熔断（不计渠道故障、不降级），
+	// 仅作为可观测标签区分「上游拒绝」与「渠道故障」。
+	BreakerSentinel BreakerEffectType = "sentinel"
 )
 
 // FailureDecision 是网关层对单次上游失败的完整结构化评定结果：
@@ -94,6 +97,14 @@ func ClassifyBreakerEffect(err *types.NewAPIError) (BreakerEffectType, time.Time
 	}
 	if loadbalancer.IsUpstreamPermissionError(err) {
 		return BreakerPermission, time.Time{}
+	}
+	// 哨兵拦截是上游免费池对 egress IP 的临时限制：egress 轮转/换渠道即可自愈，
+	// 不是渠道故障。计入 BreakerRelay 会把健康的免费池渠道软降级，故显式归类为
+	// BreakerSentinel（no-op 熔断，仅保留可观测语义）。必须在 IsUpstreamRelayError
+	// 之前判定——哨兵错误码不在其 relayKeywords 表里时靠错误文案兜不住，且顺序
+	// 一旦倒置会被兜底分支抢先吞掉。
+	if types.IsUpstreamSentinelBlocked(err) {
+		return BreakerSentinel, time.Time{}
 	}
 	if loadbalancer.IsUpstreamRelayError(err) {
 		return BreakerRelay, time.Time{}
@@ -390,6 +401,13 @@ func DecideRelayRetry(c *gin.Context, err *types.NewAPIError, retryTimes int) Po
 	// 智能负载：上游渠道权限受限/分组无权访问/TokenPlan不支持（换渠道重试）
 	if loadbalancer.IsUpstreamPermissionError(err) {
 		return PolicyDecision{Action: "retry", Reason: "upstream_permission_denied", Source: "loadbalancer"}
+	}
+	// 上游反滥用哨兵拦截（200 + 伪正常回复，固定文案）：IP/指纹级临时限制，不是
+	// 请求或渠道的错，换渠道大概率能过。必须先于下方两道闸门（2xx 排除与
+	// alwaysSkipCodes），否则就是死代码——哨兵错误形态同时满足「上游 200」与
+	// 「bad_response_body 族 skip」两种拦截（判据理由同上方水合族注释）。
+	if types.IsUpstreamSentinelBlocked(err) {
+		return PolicyDecision{Action: "retry", Reason: "upstream_sentinel_blocked", Source: "loadbalancer"}
 	}
 	code := err.StatusCode
 	if code >= 200 && code < 300 {

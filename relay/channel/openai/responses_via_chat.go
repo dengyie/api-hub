@@ -29,11 +29,21 @@ func OaiChatToResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	}
 
 	var chatResp dto.OpenAITextResponse
+	// 上游对非流式请求回 SSE body（强转流式/哨兵）时先聚合还原再解析。
+	restoredBody, apiErr := guardNonStreamUpstreamBody(c, body, "chat")
+	if apiErr != nil {
+		return nil, apiErr
+	}
+	body = restoredBody
 	if err := common.Unmarshal(body, &chatResp); err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
 	if oaiError := chatResp.GetOpenAIError(); oaiError != nil && oaiError.Type != "" {
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
+	}
+	// 反滥用哨兵判别：防止 200 + 拦截文案被当成功计费。
+	if sentinelText := upstreamAntiProbeSentinelText(&chatResp); sentinelText != "" {
+		return nil, types.NewOpenAIError(fmt.Errorf("上游反滥用哨兵拦截: %s", sentinelText), types.ErrorCodeUpstreamSentinelBlocked, http.StatusBadGateway)
 	}
 
 	info.ObserveResponseModel(chatResp.Model)

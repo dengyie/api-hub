@@ -80,6 +80,13 @@ const (
 	ErrorCodeBadResponseStatusCode  ErrorCode = "bad_response_status_code"
 	ErrorCodeBadResponse            ErrorCode = "bad_response"
 	ErrorCodeBadResponseBody        ErrorCode = "bad_response_body"
+	// ErrorCodeUpstreamSentinelBlocked 表示上游反滥用哨兵拦截（200 + 伪正常回复的
+	// 固定文案，id 含 freeipblk/freeblock）。**刻意不并入 bad_response_body**：
+	// 后者在 operation_setting.alwaysSkipCodes 默认集合里，DecideRelayRetry 会在
+	// 闸门处直接 stop —— 哨兵命中是 IP/指纹级临时限制，换渠道大概率能过，必须
+	// failover。专用码同时让 ClassifyBreakerEffect 能精确归类 BreakerSentinel
+	// （免费池 egress 轮转自愈，不硬熔断健康渠道）。
+	ErrorCodeUpstreamSentinelBlocked ErrorCode = "upstream_sentinel_blocked"
 	ErrorCodeEmptyResponse          ErrorCode = "empty_response"
 	ErrorCodeAwsInvokeError         ErrorCode = "aws_invoke_error"
 	ErrorCodeModelNotFound          ErrorCode = "model_not_found"
@@ -397,6 +404,16 @@ func IsChannelError(err *NewAPIError) bool {
 		return false
 	}
 	return strings.HasPrefix(string(err.errorCode), "channel:")
+}
+
+// IsUpstreamSentinelBlocked 判断错误是否为上游反滥用哨兵拦截。判据只用机器可读
+// 错误码（upstream_sentinel_blocked），不做文本匹配——哨兵的错误在构造处已携带
+// 专属码，文案匹配既不可靠也会误伤恰好提到相同字样的普通上游错误。
+func IsUpstreamSentinelBlocked(err *NewAPIError) bool {
+	if err == nil {
+		return false
+	}
+	return err.errorCode == ErrorCodeUpstreamSentinelBlocked
 }
 
 func IsSkipRetryError(err *NewAPIError) bool {

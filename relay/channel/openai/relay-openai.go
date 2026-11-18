@@ -2,6 +2,7 @@ package openai
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -51,6 +52,16 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	// 智能负载：首字节前 TTFT 超时返回可重试错误，触发透明换渠道（客户端无感知）
 	if streamErr := helper.ToNewAPIError(helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 		data = NormalizeStreamFrame(data)
+		// 流式哨兵检测：哨兵 chunk 同样以数据帧送达（id 含 freeipblk/freeblock）。
+		// 不拦截会把固定拦截文案当助手回复透传给客户端并照常计费。仅在尚未向客户
+		// 端下发任何数据帧时判定（此时中断无计费副作用），命中即终止走 failover。
+		if !c.Writer.Written() && info.ReceivedVisibleContentBytes == 0 {
+			if sentinelText := streamSentinelText(data); sentinelText != "" {
+				logger.LogWarn(c, "upstream anti-probe sentinel detected in stream, aborting: %s", sentinelText)
+				sr.Stop(types.NewOpenAIError(fmt.Errorf("上游反滥用哨兵拦截: %s", sentinelText), types.ErrorCodeUpstreamSentinelBlocked, http.StatusBadGateway))
+				return
+			}
+		}
 		if lastStreamData != "" {
 			if err := HandleStreamFormat(c, info, lastStreamData, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent); err != nil {
 				common.SysLog("error handling stream format: " + err.Error())
@@ -228,14 +239,11 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 	// 部分上游网关对非流式请求返回 SSE body（反滥用哨兵或强制流式），body 以 "data:" 开头
 	// 会被下方 JSON 解析报 invalid character 'd' (bad_response_body)。嗅探到 SSE 时聚合
 	// 流式 chunk 还原为非流式 JSON 再走统一解析。
-	if isSSEFormattedBody(responseBody) {
-		aggregated, aggErr := aggregateSSEAsChatCompletion(responseBody)
-		if aggErr != nil {
-			return nil, types.NewOpenAIError(aggErr, types.ErrorCodeBadResponseBody, http.StatusBadGateway)
-		}
-		logger.LogWarn(c, "upstream returned SSE body for non-stream request, aggregated %d chunk(s)", aggregated.chunkCount)
-		responseBody = aggregated.body
+	restoredBody, apiErr := guardNonStreamUpstreamBody(c, responseBody, "chat")
+	if apiErr != nil {
+		return nil, apiErr
 	}
+	responseBody = restoredBody
 	// Unmarshal to simpleResponse
 	if info.ChannelType == constant.ChannelTypeOpenRouter && info.ChannelOtherSettings.IsOpenRouterEnterprise() {
 		// 尝试解析为 openrouter enterprise
@@ -263,8 +271,10 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 
 	// 上游反滥用哨兵以 200 + 正常 choice 形态返回（id 含 freeipblk/freeblock，内容为固定拦截
 	// 文案），既不是真实回复也不该让测活假绿。识别后按上游错误抛出，走既有熔断/failover 链。
+	// 专属错误码 upstream_sentinel_blocked：DecideRelayRetry 在 alwaysSkipCodes/2xx 闸门前
+	// 截获换渠道重试，ClassifyBreakerEffect 归 BreakerSentinel（no-op，不熔断健康渠道）。
 	if sentinelText := upstreamAntiProbeSentinelText(&simpleResponse); sentinelText != "" {
-		return nil, types.NewOpenAIError(fmt.Errorf("上游反滥用哨兵拦截: %s", sentinelText), types.ErrorCodeBadResponseBody, http.StatusBadGateway)
+		return nil, types.NewOpenAIError(fmt.Errorf("上游反滥用哨兵拦截: %s", sentinelText), types.ErrorCodeUpstreamSentinelBlocked, http.StatusBadGateway)
 	}
 
 	info.ObserveResponseModel(simpleResponse.Model)
@@ -394,14 +404,16 @@ type aggregatedChatCompletion struct {
 
 // aggregateSSEAsChatCompletion 把 SSE chat.completion.chunk 流聚合为等价的非流式
 // chat.completion JSON：choice 按 index 分桶，content 按 delta 拼接、tool_calls 按
-// index 增量合并（流式函数调用分片到完整调用）、reasoning_content 取非空值、usage
-// 取末个携带 chunk。object 硬编码 "chat.completion"（chunk 的 object 值不透传，
-// 严格客户端如 Zod/Vercel AI SDK 会校验该字段）。无法解析任何 chunk 时返回错误
-// （而非静默吞掉原始 body）。
+// index 增量合并（流式函数调用分片到完整调用）、reasoning_content 增量累加、usage
+// 取末个携带 chunk。error chunk 首个透传进聚合体 Error 字段（下游 GetOpenAIError
+// 统一拦截，避免全错误流变成 200 空响应）；error chunk 不计入 chunkCount。
+// object 硬编码 "chat.completion"（chunk 的 object 值不透传，严格客户端如
+// Zod/Vercel AI SDK 会校验该字段）。无法解析任何 chunk 时返回错误（而非静默吞掉
+// 原始 body）。
 func aggregateSSEAsChatCompletion(body []byte) (*aggregatedChatCompletion, error) {
 	type choiceAgg struct {
 		content      strings.Builder
-		reasoning    *string
+		reasoning    strings.Builder
 		finishReason string
 		toolCalls    map[int]*dto.ToolCallResponse
 		toolOrder    []int
@@ -413,6 +425,9 @@ func aggregateSSEAsChatCompletion(body []byte) (*aggregatedChatCompletion, error
 		usage      *dto.Usage
 		chunkCount int
 		hasChunk   bool
+		// 首个 error chunk 透传进聚合体：上游错误若整条流仅以 error chunk 送达，
+		// 不传播会让 OpenaiHandler 把无 choices 的聚合体当成功计费（假绿）。
+		streamError any
 	)
 	choiceBucket := func(index int) *choiceAgg {
 		bucket, ok := choices[index]
@@ -436,8 +451,10 @@ func aggregateSSEAsChatCompletion(body []byte) (*aggregatedChatCompletion, error
 		if err := common.Unmarshal([]byte(payload), &chunk); err != nil {
 			continue
 		}
-		chunkCount++
 		hasChunk = true
+		if streamError == nil {
+			chunkCount++
+		}
 		if chunk.Id != "" {
 			id = chunk.Id
 		}
@@ -448,6 +465,9 @@ func aggregateSSEAsChatCompletion(body []byte) (*aggregatedChatCompletion, error
 			usage = chunk.Usage
 		}
 		if chunk.Error != nil {
+			if streamError == nil {
+				streamError = chunk.Error
+			}
 			continue
 		}
 		for _, choice := range chunk.Choices {
@@ -455,10 +475,13 @@ func aggregateSSEAsChatCompletion(body []byte) (*aggregatedChatCompletion, error
 			if choice.Delta.Content != nil {
 				bucket.content.WriteString(*choice.Delta.Content)
 			}
+			// reasoning_content 与 content 同为逐 chunk 增量分片，必须累加而非覆盖
+			// （覆盖只会留下最后一个微片段）。reasoning/reasoning_content 双来源
+			// 共用同一 Builder：正常流两者不会交替出现，若出现也属同义字段。
 			if choice.Delta.ReasoningContent != nil {
-				bucket.reasoning = choice.Delta.ReasoningContent
-			} else if choice.Delta.Reasoning != nil && bucket.reasoning == nil {
-				bucket.reasoning = choice.Delta.Reasoning
+				bucket.reasoning.WriteString(*choice.Delta.ReasoningContent)
+			} else if choice.Delta.Reasoning != nil {
+				bucket.reasoning.WriteString(*choice.Delta.Reasoning)
 			}
 			if choice.FinishReason != nil && *choice.FinishReason != "" {
 				bucket.finishReason = *choice.FinishReason
@@ -498,11 +521,15 @@ func aggregateSSEAsChatCompletion(body []byte) (*aggregatedChatCompletion, error
 		Object: "chat.completion",
 		Model:  model,
 	}
+	if streamError != nil {
+		completion.Error = streamError
+	}
 	for _, index := range choiceOrder {
 		bucket := choices[index]
 		msg := dto.Message{Role: "assistant", Content: bucket.content.String()}
-		if bucket.reasoning != nil {
-			msg.ReasoningContent = bucket.reasoning
+		if bucket.reasoning.Len() > 0 {
+			reasoning := bucket.reasoning.String()
+			msg.ReasoningContent = &reasoning
 		}
 		if len(bucket.toolOrder) > 0 {
 			toolCalls := make([]dto.ToolCallResponse, 0, len(bucket.toolOrder))
@@ -525,6 +552,62 @@ func aggregateSSEAsChatCompletion(body []byte) (*aggregatedChatCompletion, error
 		return nil, err
 	}
 	return &aggregatedChatCompletion{body: encoded, chunkCount: chunkCount}, nil
+}
+
+// extractResponsesCompletedFromSSE 从 responses 协议的 SSE 流中抽取终态事件的
+// response 对象序列化为 JSON body。非流式 Responses 请求收到 SSE body 时（上游
+// 强转流式/哨兵），response.completed / response.done / response.incomplete 携带
+// 完整 response 对象，抽取它即可还原等价非流式 body；找不到终态事件返回错误。
+func extractResponsesCompletedFromSSE(body []byte) ([]byte, error) {
+	for _, rawLine := range bytes.Split(body, []byte("\n")) {
+		line := strings.TrimSpace(string(rawLine))
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var event struct {
+			Type     string          `json:"type"`
+			Response json.RawMessage `json:"response"`
+		}
+		if err := common.Unmarshal([]byte(payload), &event); err != nil {
+			continue
+		}
+		switch event.Type {
+		case "response.completed", "response.done", "response.incomplete", "response.failed":
+			if len(event.Response) > 0 && string(event.Response) != "null" {
+				return event.Response, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("上游返回 SSE body 但无可抽取的 responses 终态事件（前 120 字节: %.120s）", string(body))
+}
+
+// guardNonStreamUpstreamBody 统一处理「非流式请求收到 SSE body」的嗅探与还原。
+// format 为 chat（chat.completion.chunk 聚合）或 responses（终态事件抽取）。
+// 返回还原后的 JSON body；body 不是 SSE 时原样返回。
+func guardNonStreamUpstreamBody(c *gin.Context, body []byte, format string) ([]byte, *types.NewAPIError) {
+	if !isSSEFormattedBody(body) {
+		return body, nil
+	}
+	var restored []byte
+	var err error
+	if format == "responses" {
+		restored, err = extractResponsesCompletedFromSSE(body)
+	} else {
+		aggregated, aggErr := aggregateSSEAsChatCompletion(body)
+		if aggErr == nil {
+			restored = aggregated.body
+			logger.LogWarn(c, "upstream returned SSE body for non-stream request, aggregated %d chunk(s)", aggregated.chunkCount)
+		}
+		err = aggErr
+	}
+	if err != nil {
+		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusBadGateway)
+	}
+	return restored, nil
 }
 
 // upstreamAntiProbeSentinelIDMarkers 是已实证的上游反滥用哨兵 id 标记（免费池对探针
@@ -557,6 +640,57 @@ func upstreamAntiProbeSentinelText(resp *dto.OpenAITextResponse) string {
 		if strings.Contains(choice.Message.StringContent(), upstreamSentinelContentMark) {
 			return choice.Message.StringContent()
 		}
+	}
+	return ""
+}
+
+// streamSentinelText 对单个流式数据帧做哨兵判别：只信 id 精确标记（流式形态
+// 没有「小 usage」可做兜底门槛，正文匹配误伤面太大——模型输出讨论网络限制
+// 的正常内容会被误杀）。
+func streamSentinelText(data string) string {
+	var chunk dto.ChatCompletionsStreamResponse
+	if err := common.UnmarshalJsonStr(data, &chunk); err != nil {
+		return ""
+	}
+	if strings.Contains(chunk.Id, upstreamSentinelIDMarkerIP) || strings.Contains(chunk.Id, upstreamSentinelIDMarkerKey) {
+		for _, choice := range chunk.Choices {
+			if choice.Delta.Content != nil && *choice.Delta.Content != "" {
+				return *choice.Delta.Content
+			}
+		}
+		return "(哨兵未携带正文)"
+	}
+	return ""
+}
+
+// responsesAntiProbeSentinelText 是哨兵判别的 Responses 协议变体：正文从
+// output[].content[].text 抽取（Responses 协议没有 choices/message 结构），
+// id 判别式与 usage 兜底门槛与 chat 形态完全一致。
+func responsesAntiProbeSentinelText(resp *dto.OpenAIResponsesResponse) string {
+	if resp == nil {
+		return ""
+	}
+	contentOf := func() string {
+		for _, output := range resp.Output {
+			for _, part := range output.Content {
+				if part.Text != "" {
+					return part.Text
+				}
+			}
+		}
+		return ""
+	}
+	if strings.Contains(resp.ID, upstreamSentinelIDMarkerIP) || strings.Contains(resp.ID, upstreamSentinelIDMarkerKey) {
+		if content := contentOf(); content != "" {
+			return content
+		}
+		return "(哨兵未携带正文)"
+	}
+	if resp.Usage == nil || resp.Usage.TotalTokens == 0 || resp.Usage.TotalTokens > 2 {
+		return ""
+	}
+	if content := contentOf(); strings.Contains(content, upstreamSentinelContentMark) {
+		return content
 	}
 	return ""
 }
