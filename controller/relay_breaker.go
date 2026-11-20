@@ -163,6 +163,47 @@ func applyUpstreamFailureEffects(c *gin.Context, channel *model.Channel, relayIn
 		return effective
 	}
 
+	// 自愈型周期额度耗尽的定时熔断（2026-11-20 机制根修，用户裁定生效面
+	// 收敛到显式配置的渠道：当前 #394 joystar / #374 1tim）。
+	//
+	// 这类错误（日限/周限，文案带 "resets at HH:MM"/「凌晨X点重置」）落在
+	// 429 时会被下方 BreakerRateLimit 接走，按 rate_limit_cooldown_seconds
+	// （30s）短避让——但 30 秒对「当天确定性拿不到额度」是错的：冷却一过
+	// 渠道回池继续被优先选中，每个新请求白撞一次再换道（生产实测 #394
+	// 三天 181 次 429 全部如此烧重试预算）。
+	//
+	// 出口：命中 IsSelfHealingQuotaError 且渠道显式开启
+	// self_healing_quota_cooldown_seconds 时，优先从文案解析重置时间点
+	// （ParseSelfHealingQuotaReset，Moscow/UTC/Shanghai 已知城市映射），
+	// 定时熔断到那个时刻；解析不出退避用配置的固定秒数。与宵禁同走
+	// TripBreakerUntil 绝对到期路径（不参与递增退避、不禁用渠道、到点
+	// 自动回池，零人工）。
+	//
+	// 必须在 ClassifyBreakerEffect 之前截获：那里 429 无条件归 RateLimit
+	// 短避让，这是本修复要替换的行为。IsSelfHealingQuotaError 的判据
+	// 要求明确重置信号（resets at/daily limit/凌晨X点重置），
+	// 「额度已用完或并发已满」类瞬时混排文案不命中。
+	if policy := loadbalancer.GetPolicy().Resolve(channel.Id); policy.SelfHealingQuotaCooldownSeconds > 0 &&
+		loadbalancer.IsSelfHealingQuotaError(newAPIError) {
+		effective := scopeOf(newAPIError)
+		resetAt, ok := loadbalancer.ParseSelfHealingQuotaReset(newAPIError, time.Now())
+		var until time.Time
+		var basis string
+		if ok && resetAt.After(time.Now()) {
+			until = resetAt
+			basis = "解析到额度重置时间点 " + resetAt.Format("2006-01-02 15:04 MST")
+		} else {
+			until = time.Now().Add(time.Duration(policy.SelfHealingQuotaCooldownSeconds) * time.Second)
+			basis = "文案未含可解析的重置时刻，退避固定冷却"
+		}
+		loadbalancer.GlobalTracker().TripBreakerUntil(channel.Id, effective, until)
+		logBreakerAlert(c, channel.Id,
+			fmt.Sprintf("渠道 #%d [%s] 上游周期额度耗尽（自愈型，%d s 冷却口径）", channel.Id, scopeLabel(effective), policy.SelfHealingQuotaCooldownSeconds),
+			basis+"，已定时熔断到 "+until.Format("01-02 15:04 MST")+"，到点自动回池")
+		tripSiblingsForSelfHealing(channel, modelName, effective, until)
+		return
+	}
+
 	// 智能负载：基于收敛的错误分类执行严格单次熔断
 	effect, curfewUntil := service.ClassifyBreakerEffect(newAPIError)
 	// 不透明 400 水合失败（中转站抹掉 code、只留 "bad response status code 400"）：
@@ -243,5 +284,17 @@ func applyUpstreamFailureEffects(c *gin.Context, channel *model.Channel, relayIn
 			fmt.Sprintf("渠道 #%d [%s] 上游中继代理异常 (bad response status code / 渠道出错)", channel.Id, scopeLabel(tripped)),
 			"已立即熔断: "+newAPIError.Error())
 	case service.BreakerNone:
+	}
+}
+
+// tripSiblingsForSelfHealing 自愈型定时熔断连带熔断映射到同一上游模型的
+// 兄弟客户端模型——与 tripModelScope 的 sibling 语义一致，但 until 是
+// 绝对重置时刻，不能复用零值路径。
+func tripSiblingsForSelfHealing(channel *model.Channel, modelName, effective string, until time.Time) {
+	for _, sibling := range loadbalancer.SiblingModelsFromMapping(channel.GetModelMapping(), modelName) {
+		if sibling == effective {
+			continue
+		}
+		loadbalancer.GlobalTracker().TripBreakerUntil(channel.Id, sibling, until)
 	}
 }

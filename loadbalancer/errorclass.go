@@ -1056,3 +1056,80 @@ func SiblingModelsFromMapping(mappingJSON, model string) []string {
 	sort.Strings(siblings)
 	return siblings
 }
+
+// ParseSelfHealingQuotaReset 从自愈型额度耗尽错误文案中解析「额度重置时间点」。
+//
+// 已知上游措辞（生产实测）：
+//   - 渠道 #394 joystar: "The limit resets at 00:00 Moscow time."（莫斯科 UTC+3）
+//   - 渠道 #374 1tim:   "明天凌晨0点自动重置"（上海 UTC+8）
+//
+// 解析成功返回对应时区的下一个重置时刻；解析不出（文案漂移、新上游措辞）
+// 返回 false，由调用方退避到固定冷却时长。解析刻意保守：只认已见过的两种
+// 措辞模式，宽泛匹配会把 #121「额度已用完或并发已满」这类瞬时/并发混排
+// 文案误判成日限型，让并发耗尽的渠道被错误冷却数小时。
+func ParseSelfHealingQuotaReset(err *types.NewAPIError, now time.Time) (time.Time, bool) {
+	if err == nil {
+		return time.Time{}, false
+	}
+	msg := err.Error()
+	// 措辞 A："resets at HH:MM <City> time" —— 城市名映射到 IANA 时区。
+	if m := resetAtRe.FindStringSubmatch(msg); m != nil {
+		if loc, ok := resetCityTZ[strings.ToLower(m[2])]; ok {
+			var hour, minute int
+			fmt.Sscanf(m[1], "%d:%d", &hour, &minute)
+			return nextDailyTime(now, loc, hour, minute), true
+		}
+		return time.Time{}, false
+	}
+	// 措辞 B：中文「(明天|明日)?凌晨?X点...重置」—— 上海时区。
+	if m := resetCNRe.FindStringSubmatch(msg); m != nil && strings.Contains(msg, "重置") {
+		hour := 0
+		if m[2] != "" {
+			fmt.Sscanf(m[2], "%d", &hour)
+		}
+		return nextDailyTime(now, shanghaiLoc(), hour, 0), true
+	}
+	return time.Time{}, false
+}
+
+var (
+	// "resets at 00:00 Moscow time" / "reset at 05:00 UTC" 等。
+	resetAtRe = regexp.MustCompile(`(?i)resets? at (\d{1,2}:\d{2})\s+([A-Za-z]+)\s+time`)
+	// "明天凌晨0点自动重置" / "明天0点重置" / "凌晨3点自动重置"。
+	resetCNRe = regexp.MustCompile(`(明天|明日)?凌晨?(\d{1,2})?点[^。]{0,20}重置`)
+)
+
+// resetCityTZ 错误文案里出现过的城市名 → IANA 时区。新上游出现新城市时在此登记。
+var resetCityTZ = map[string]*time.Location{
+	"moscow":  mustLoc("Europe/Moscow"),
+	"utc":     time.UTC,
+	"shanghai": shanghaiLoc(),
+}
+
+func shanghaiLoc() *time.Location {
+	loc, _ := time.LoadLocation("Asia/Shanghai")
+	if loc == nil {
+		loc = time.FixedZone("CST", 8*3600)
+	}
+	return loc
+}
+
+func mustLoc(name string) *time.Location {
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return time.UTC
+	}
+	return loc
+}
+
+// nextDailyTime 返回 loc 时区下 now 之后的下一个 daily hour:minute 时刻。
+// "明天凌晨0点" 类措辞（明天/明日前缀）至少加一天，避免深夜 23:5x 命中当天
+// 已过期的 0 点。
+func nextDailyTime(now time.Time, loc *time.Location, hour, minute int) time.Time {
+	local := now.In(loc)
+	end := time.Date(local.Year(), local.Month(), local.Day(), hour, minute, 0, 0, loc)
+	if !local.Before(end) {
+		end = end.Add(24 * time.Hour)
+	}
+	return end
+}

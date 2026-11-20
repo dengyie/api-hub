@@ -252,6 +252,18 @@ type ChannelPolicy struct {
 	// Breaker 熔断器参数
 	Breaker BreakerPolicy `yaml:"breaker"`
 
+	// SelfHealingQuotaCooldownSeconds 该渠道命中「自愈型周期额度耗尽」
+	// （IsSelfHealingQuotaError：日限/周限，文案带 resets at/凌晨X点重置）
+	// 时的定时熔断冷却（秒）。这类错误 30s 短冷却语义完全错误——30 秒后
+	// 回池继续吃流量，每个请求白撞一次再换道（生产实测 #394 三天 181 次
+	// 429 全部如此浪费重试预算）。>0 时命中即 TripBreakerUntil 到「额度
+	// 重置时间点」（从错误文案解析，Moscow/UTC/Shanghai 已知城市映射）；
+	// 文案解析不出时退避用本值。0 = 关闭（默认，不影响未配置渠道）。
+	//
+	// 生效面收敛（2026-11-20 用户裁定）：仅 #394 joystar / #374 1tim 开启。
+	// 判据文案级匹配（与 #121「额度已用完或并发已满」瞬时混排措辞天然隔离）。
+	SelfHealingQuotaCooldownSeconds int64 `yaml:"self_healing_quota_cooldown_seconds"`
+
 	// BreakerExempt 豁免熔断与自动禁用。
 	//
 	// 用于本机 CPA（127.0.0.1:8317）这类兜底渠道：它们是最后一道防线，
