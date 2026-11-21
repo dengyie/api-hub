@@ -499,3 +499,55 @@ func TestFalStreamSSEOutput(t *testing.T) {
 	assert.Contains(t, body, "stream_out.mp4")
 	assert.Contains(t, body, "data: [DONE]")
 }
+
+func BenchmarkCleanOpenAIRequest(b *testing.B) {
+	req := &dto.GeneralOpenAIRequest{
+		Model: "fal-ai/kling-video/v3/pro/text-to-video",
+		Messages: []dto.Message{
+			{Role: "system", Content: "You are a video generator."},
+			{Role: "user", Content: "Generate a futuristic cyberpunk city at night with neon lights."},
+		},
+		Temperature: func(f float64) *float64 { return &f }(0.7),
+		Stream:      func(b bool) *bool { return &b }(true),
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, err := CleanOpenAIRequest(nil, nil, req)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkExtractVideoURL(b *testing.B) {
+	body := []byte(`{"video": {"url": "https://v.fal.media/rendered_video.mp4"}, "seed": 42}`)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, err := ExtractVideoURL(body)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkParseTaskResultPolling(b *testing.B) {
+	taskAdaptor := &TaskAdaptor{}
+	fakeTask := &model.Task{
+		TaskID: "req_bench",
+		Data:   []byte(`{"request_id":"req_bench","status_url":"https://queue.fal.run/status"}`),
+	}
+	resp := &http.Response{StatusCode: http.StatusOK}
+	statusBody := []byte(`{"status":"IN_PROGRESS","queue_position":3,"logs":[{"message":"rendering frame 120/300"}],"metrics":{"gpu_utilization":0.95}}`)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		info, err := taskAdaptor.ParseTaskResult(fakeTask, resp, statusBody)
+		if err != nil || info.Status != string(model.TaskStatusInProgress) {
+			b.Fatal(err)
+		}
+	}
+}

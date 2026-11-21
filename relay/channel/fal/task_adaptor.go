@@ -148,7 +148,7 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 	rawBytes := a.cachedRawBody
 	if len(rawBytes) == 0 && c != nil && c.Request != nil && c.Request.Body != nil {
 		var err error
-		rawBytes, err = io.ReadAll(c.Request.Body)
+		rawBytes, err = io.ReadAll(io.LimitReader(c.Request.Body, 10<<20))
 		if err != nil {
 			return nil, err
 		}
@@ -159,32 +159,29 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 		return nil, errors.New("empty request body")
 	}
 
-	var rawMap map[string]any
-	if err := common.Unmarshal(rawBytes, &rawMap); err != nil {
-		return nil, fmt.Errorf("invalid json request: %w", err)
-	}
-
-	// Clean OpenAI specific parameters
+	// Clean OpenAI specific parameters using zero-allocation gjson scan
 	cleanPayload := make(map[string]any)
-	for k, v := range rawMap {
+	gjson.ParseBytes(rawBytes).ForEach(func(key, value gjson.Result) bool {
+		k := key.String()
 		if _, omit := openAIFieldsToOmit[k]; !omit {
-			cleanPayload[k] = v
+			cleanPayload[k] = value.Value()
 		}
-	}
+		return true
+	})
 
 	// Map input_reference -> image_url if needed
 	if _, hasImage := cleanPayload["image_url"]; !hasImage {
-		if ref, ok := rawMap["input_reference"]; ok && ref != nil {
-			cleanPayload["image_url"] = ref
-		} else if img, ok := rawMap["image"]; ok && img != nil {
-			cleanPayload["image_url"] = img
+		if ref := gjson.GetBytes(rawBytes, "input_reference"); ref.Exists() {
+			cleanPayload["image_url"] = ref.Value()
+		} else if img := gjson.GetBytes(rawBytes, "image"); img.Exists() {
+			cleanPayload["image_url"] = img.Value()
 		}
 	}
 
 	// Map seconds -> duration if needed
 	if _, hasDuration := cleanPayload["duration"]; !hasDuration {
-		if sec, ok := rawMap["seconds"]; ok && sec != nil {
-			cleanPayload["duration"] = sec
+		if sec := gjson.GetBytes(rawBytes, "seconds"); sec.Exists() {
+			cleanPayload["duration"] = sec.Value()
 		}
 	}
 
@@ -230,7 +227,7 @@ func (a *TaskAdaptor) ParseResponse(c *gin.Context, resp *http.Response, info *r
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, service.TaskErrorWrapperLocal(err, "read_upstream_response_failed", http.StatusBadGateway)
 	}
@@ -317,18 +314,14 @@ func (a *TaskAdaptor) ParseTaskResult(task *model.Task, resp *http.Response, res
 		}, nil
 	}
 
-	var statusResp FalQueueStatusResponse
-	if err := common.Unmarshal(respBody, &statusResp); err != nil {
-		return nil, fmt.Errorf("failed to parse fal status response: %w", err)
-	}
+	status := gjson.GetBytes(respBody, "status").String()
 
-	var taskData FalTaskData
-	_ = task.GetData(&taskData)
-
-	if strings.EqualFold(statusResp.Status, "COMPLETED") {
+	if strings.EqualFold(status, "COMPLETED") {
 		// Use verbatim response_url
-		responseURL := statusResp.ResponseURL
+		responseURL := gjson.GetBytes(respBody, "response_url").String()
 		if responseURL == "" {
+			var taskData FalTaskData
+			_ = task.GetData(&taskData)
 			responseURL = taskData.ResponseURL
 		}
 		if responseURL == "" {
@@ -353,7 +346,7 @@ func (a *TaskAdaptor) ParseTaskResult(task *model.Task, resp *http.Response, res
 		}
 		defer resultResp.Body.Close()
 
-		resultBytes, err := io.ReadAll(resultResp.Body)
+		resultBytes, err := io.ReadAll(io.LimitReader(resultResp.Body, 10<<20))
 		if err != nil {
 			return nil, fmt.Errorf("failed to read fal final result: %w", err)
 		}
@@ -369,6 +362,8 @@ func (a *TaskAdaptor) ParseTaskResult(task *model.Task, resp *http.Response, res
 			return nil, fmt.Errorf("failed to extract video url: %w", err)
 		}
 
+		var taskData FalTaskData
+		_ = task.GetData(&taskData)
 		taskData.VideoURL = videoURL
 		task.SetData(taskData)
 		return &relaycommon.TaskInfo{
@@ -378,7 +373,7 @@ func (a *TaskAdaptor) ParseTaskResult(task *model.Task, resp *http.Response, res
 		}, nil
 	}
 
-	if strings.EqualFold(statusResp.Status, "FAILED") {
+	if strings.EqualFold(status, "FAILED") {
 		failReason := ExtractErrorMsg(respBody)
 		if failReason == "" {
 			failReason = "fal upstream task status failed"
@@ -389,17 +384,17 @@ func (a *TaskAdaptor) ParseTaskResult(task *model.Task, resp *http.Response, res
 		}, nil
 	}
 
-	if strings.EqualFold(statusResp.Status, "IN_PROGRESS") {
+	if strings.EqualFold(status, "IN_PROGRESS") {
 		return &relaycommon.TaskInfo{
 			Status:   string(model.TaskStatusInProgress),
 			Progress: "50%",
 		}, nil
 	}
 
-	if strings.EqualFold(statusResp.Status, "IN_QUEUE") {
+	if strings.EqualFold(status, "IN_QUEUE") {
 		progress := "10%"
-		if statusResp.QueuePosition != nil {
-			progress = fmt.Sprintf("queue pos: %d", *statusResp.QueuePosition)
+		if qPos := gjson.GetBytes(respBody, "queue_position"); qPos.Exists() {
+			progress = fmt.Sprintf("queue pos: %d", qPos.Int())
 		}
 		return &relaycommon.TaskInfo{
 			Status:   string(model.TaskStatusQueued),

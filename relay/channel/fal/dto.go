@@ -8,6 +8,17 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+var candidateVideoPaths = []string{
+	"video.url",
+	"videos.0.url",
+	"output.video.url",
+	"output.videos.0.url",
+	"video_url",
+	"images.0.url",
+	"output.images.0.url",
+	"image.url",
+}
+
 type FalQueueSubmitResponse struct {
 	RequestID   string `json:"request_id"`
 	StatusURL   string `json:"status_url"`
@@ -66,7 +77,11 @@ func ExtractErrorMsg(body []byte) string {
 	if val := res.Get("error"); val.Exists() && val.String() != "" {
 		return val.String()
 	}
-	return string(body)
+	msg := string(body)
+	if len(msg) > 512 {
+		return msg[:512] + "..."
+	}
+	return msg
 }
 
 func ExtractVideoURL(body []byte) (string, error) {
@@ -74,17 +89,7 @@ func ExtractVideoURL(body []byte) (string, error) {
 		return "", fmt.Errorf("empty response body from fal")
 	}
 	res := gjson.ParseBytes(body)
-	candidatePaths := []string{
-		"video.url",
-		"videos.0.url",
-		"output.video.url",
-		"output.videos.0.url",
-		"video_url",
-		"images.0.url",
-		"output.images.0.url",
-		"image.url",
-	}
-	for _, p := range candidatePaths {
+	for _, p := range candidateVideoPaths {
 		if val := res.Get(p); val.Exists() && val.String() != "" {
 			return val.String(), nil
 		}
@@ -95,7 +100,11 @@ func ExtractVideoURL(body []byte) (string, error) {
 		return urlVal.String(), nil
 	}
 
-	return "", fmt.Errorf("no video url found in fal response: %s", string(body))
+	preview := string(body)
+	if len(preview) > 256 {
+		preview = preview[:256] + "..."
+	}
+	return "", fmt.Errorf("no video url found in fal response: %s", preview)
 }
 
 func MarshalJSON(v any) ([]byte, error) {

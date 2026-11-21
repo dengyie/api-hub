@@ -9,6 +9,7 @@ import (
 	relaycommon "github.com/dengyie/apihub/relay/common"
 	"github.com/dengyie/apihub/relaykit/dto"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 var openAIFieldsToOmit = map[string]struct{}{
@@ -58,32 +59,30 @@ func CleanOpenAIRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dt
 
 	payload := make(map[string]any)
 
-	// If raw body exists in context storage, load extra non-OpenAI fields
+	// If raw body exists in context storage, load extra non-OpenAI fields via zero-copy gjson scan
 	if c != nil {
 		if storage, err := common.GetBodyStorage(c); err == nil && storage != nil {
 			if rawBytes, bErr := storage.Bytes(); bErr == nil && len(rawBytes) > 0 {
-				var rawMap map[string]any
-				if err := common.Unmarshal(rawBytes, &rawMap); err == nil {
-					for k, v := range rawMap {
-						if _, omit := openAIFieldsToOmit[k]; !omit {
-							payload[k] = v
-						}
+				gjson.ParseBytes(rawBytes).ForEach(func(key, value gjson.Result) bool {
+					k := key.String()
+					if _, omit := openAIFieldsToOmit[k]; !omit {
+						payload[k] = value.Value()
 					}
-				}
+					return true
+				})
 			}
 		}
 	}
 
 	// Also check request.ExtraBody
 	if len(request.ExtraBody) > 0 {
-		var extraMap map[string]any
-		if err := common.Unmarshal(request.ExtraBody, &extraMap); err == nil {
-			for k, v := range extraMap {
-				if _, omit := openAIFieldsToOmit[k]; !omit {
-					payload[k] = v
-				}
+		gjson.ParseBytes(request.ExtraBody).ForEach(func(key, value gjson.Result) bool {
+			k := key.String()
+			if _, omit := openAIFieldsToOmit[k]; !omit {
+				payload[k] = value.Value()
 			}
-		}
+			return true
+		})
 	}
 
 	// Extract prompt and image_url from messages
@@ -105,30 +104,35 @@ func CleanOpenAIRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dt
 		}
 
 		if targetMsg != nil {
-			// Extract text and image_url
-			mediaContents := targetMsg.ParseContent()
-			if len(mediaContents) > 0 {
-				var textParts []string
-				for _, part := range mediaContents {
-					switch part.Type {
-					case dto.ContentTypeText:
-						if trimmed := strings.TrimSpace(part.Text); trimmed != "" {
-							textParts = append(textParts, trimmed)
-						}
-					case dto.ContentTypeImageURL:
-						imgMedia := part.GetImageMedia()
-						if imgMedia != nil && imgMedia.Url != "" {
-							if extractedImageURL == "" {
-								extractedImageURL = imgMedia.Url
+			if targetMsg.IsStringContent() {
+				extractedPrompt = strings.TrimSpace(targetMsg.StringContent())
+			} else {
+				// Extract text and image_url from multimodal content
+				mediaContents := targetMsg.ParseContent()
+				if len(mediaContents) > 0 {
+					var textBuilder strings.Builder
+					for _, part := range mediaContents {
+						switch part.Type {
+						case dto.ContentTypeText:
+							if trimmed := strings.TrimSpace(part.Text); trimmed != "" {
+								if textBuilder.Len() > 0 {
+									textBuilder.WriteByte('\n')
+								}
+								textBuilder.WriteString(trimmed)
+							}
+						case dto.ContentTypeImageURL:
+							imgMedia := part.GetImageMedia()
+							if imgMedia != nil && imgMedia.Url != "" {
+								if extractedImageURL == "" {
+									extractedImageURL = imgMedia.Url
+								}
 							}
 						}
 					}
+					if textBuilder.Len() > 0 {
+						extractedPrompt = textBuilder.String()
+					}
 				}
-				if len(textParts) > 0 {
-					extractedPrompt = strings.Join(textParts, "\n")
-				}
-			} else if targetMsg.IsStringContent() {
-				extractedPrompt = strings.TrimSpace(targetMsg.StringContent())
 			}
 		}
 	}

@@ -18,6 +18,14 @@ import (
 	"github.com/dengyie/apihub/relaykit/types"
 	"github.com/dengyie/apihub/service"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
+)
+
+var (
+	sseKeepAlive  = []byte(": keep-alive\n\n")
+	sseDataDone   = []byte("data: [DONE]\n\n")
+	sseDataPrefix = []byte("data: ")
+	sseDoubleLF   = []byte("\n\n")
 )
 
 type Adaptor struct{}
@@ -161,7 +169,7 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 	}
 	defer resp.Body.Close()
 
-	body, readErr := io.ReadAll(resp.Body)
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if readErr != nil {
 		return nil, types.NewError(fmt.Errorf("failed to read fal submit response: %w", readErr), types.ErrorCodeBadResponse)
 	}
@@ -223,7 +231,7 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 
 		case <-heartbeatTicker.C:
 			if info.IsStream {
-				_, _ = c.Writer.Write([]byte(": keep-alive\n\n"))
+				_, _ = c.Writer.Write(sseKeepAlive)
 				c.Writer.Flush()
 			}
 
@@ -241,31 +249,29 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 				continue
 			}
 
-			statusBody, sReadErr := io.ReadAll(statusResp.Body)
+			statusBody, sReadErr := io.ReadAll(io.LimitReader(statusResp.Body, 512<<10))
 			statusResp.Body.Close()
 			if sReadErr != nil || statusResp.StatusCode >= 400 {
 				continue
 			}
 
-			var queueStatus FalQueueStatusResponse
-			if jErr := common.Unmarshal(statusBody, &queueStatus); jErr != nil {
-				continue
-			}
-
-			if queueStatus.ResponseURL != "" {
-				responseURL = queueStatus.ResponseURL
-			}
-
-			if strings.EqualFold(queueStatus.Status, "COMPLETED") {
+			statusStr := gjson.GetBytes(statusBody, "status").String()
+			if strings.EqualFold(statusStr, "COMPLETED") {
+				if rURL := gjson.GetBytes(statusBody, "response_url").String(); rURL != "" {
+					responseURL = rURL
+				}
 				completed = true
 				break
 			}
-			if strings.EqualFold(queueStatus.Status, "FAILED") {
+			if strings.EqualFold(statusStr, "FAILED") {
 				finalFailReason = ExtractErrorMsg(statusBody)
 				if finalFailReason == "" {
 					finalFailReason = "upstream fal video task failed"
 				}
 				return nil, types.NewError(errors.New(finalFailReason), types.ErrorCodeBadResponse)
+			}
+			if rURL := gjson.GetBytes(statusBody, "response_url").String(); rURL != "" {
+				responseURL = rURL
 			}
 		}
 	}
@@ -288,7 +294,7 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 	}
 	defer resultResp.Body.Close()
 
-	resultBody, rReadErr := io.ReadAll(resultResp.Body)
+	resultBody, rReadErr := io.ReadAll(io.LimitReader(resultResp.Body, 10<<20))
 	if rReadErr != nil {
 		return nil, types.NewError(fmt.Errorf("failed to read fal final result: %w", rReadErr), types.ErrorCodeBadResponse)
 	}
@@ -332,7 +338,9 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 			},
 		}
 		chunkContentBytes, _ := common.Marshal(chunkContent)
-		_, _ = c.Writer.Write([]byte(fmt.Sprintf("data: %s\n\n", chunkContentBytes)))
+		_, _ = c.Writer.Write(sseDataPrefix)
+		_, _ = c.Writer.Write(chunkContentBytes)
+		_, _ = c.Writer.Write(sseDoubleLF)
 
 		// Send finish chunk
 		chunkFinish := gin.H{
@@ -349,8 +357,10 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 			},
 		}
 		chunkFinishBytes, _ := common.Marshal(chunkFinish)
-		_, _ = c.Writer.Write([]byte(fmt.Sprintf("data: %s\n\n", chunkFinishBytes)))
-		_, _ = c.Writer.Write([]byte("data: [DONE]\n\n"))
+		_, _ = c.Writer.Write(sseDataPrefix)
+		_, _ = c.Writer.Write(chunkFinishBytes)
+		_, _ = c.Writer.Write(sseDoubleLF)
+		_, _ = c.Writer.Write(sseDataDone)
 		c.Writer.Flush()
 	} else {
 		c.JSON(http.StatusOK, gin.H{
