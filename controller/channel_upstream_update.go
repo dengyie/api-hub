@@ -17,6 +17,7 @@ import (
 	"github.com/dengyie/apihub/model"
 	"github.com/dengyie/apihub/pkg/jsplugin"
 	"github.com/dengyie/apihub/relay/channel/advancedcustom"
+	"github.com/dengyie/apihub/relay/channel/fal"
 	"github.com/dengyie/apihub/relay/channel/gemini"
 	"github.com/dengyie/apihub/relay/channel/ollama"
 	relaycommon "github.com/dengyie/apihub/relay/common"
@@ -388,6 +389,9 @@ func fetchChannelUpstreamModelIDs(channel *model.Channel) ([]string, error) {
 			return nil, fmt.Errorf("task plugin %q is not registered", channel.GetSetting().TaskPluginKey)
 		}
 		return normalizeModelNames(plugin.Meta.Models), nil
+	}
+	if channel.Type == constant.ChannelTypeFal {
+		return normalizeModelNames(fal.ModelList), nil
 	}
 	baseURL := constant.GetChannelBaseURL(channel.Type)
 	if channel.GetBaseURL() != "" {

@@ -773,7 +773,27 @@ func (channel *Channel) GetBaseURL() string {
 	if url == "" {
 		url = constant.GetChannelBaseURL(channel.Type)
 	}
+	if channel.Type == constant.ChannelTypeFal {
+		url = normalizeFalBaseURL(url)
+	}
 	return url
+}
+
+func normalizeFalBaseURL(raw string) string {
+	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
+	if raw == "" {
+		return "https://queue.fal.run"
+	}
+	if raw == "https://fal.run" || raw == "http://fal.run" {
+		return "https://queue.fal.run"
+	}
+	if strings.HasPrefix(raw, "https://fal.run/") {
+		return "https://queue.fal.run" + strings.TrimPrefix(raw, "https://fal.run")
+	}
+	if strings.HasPrefix(raw, "http://fal.run/") {
+		return "http://queue.fal.run" + strings.TrimPrefix(raw, "http://fal.run")
+	}
+	return raw
 }
 
 func (channel *Channel) GetModelMapping() string {

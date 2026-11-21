@@ -18,6 +18,7 @@ import (
 	"github.com/dengyie/apihub/model"
 	"github.com/dengyie/apihub/pkg/jsplugin"
 	relaychannel "github.com/dengyie/apihub/relay/channel"
+	"github.com/dengyie/apihub/relay/channel/fal"
 	"github.com/dengyie/apihub/relay/channel/ollama"
 	relaycommon "github.com/dengyie/apihub/relay/common"
 	"github.com/dengyie/apihub/relaykit/dto"
@@ -613,6 +614,15 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 			}
 			defaultBaseURL := plugin.Meta.BaseURL
 			channel.BaseURL = &defaultBaseURL
+		}
+	}
+	if channel.Type == constant.ChannelTypeFal {
+		if channel.BaseURL == nil || strings.TrimSpace(*channel.BaseURL) == "" {
+			defaultBaseURL := fal.DefaultBaseURL
+			channel.BaseURL = &defaultBaseURL
+		} else {
+			normalized := fal.NormalizeBaseURL(*channel.BaseURL)
+			channel.BaseURL = &normalized
 		}
 	}
 

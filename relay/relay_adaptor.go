@@ -21,6 +21,7 @@ import (
 	"github.com/dengyie/apihub/relay/channel/coze"
 	"github.com/dengyie/apihub/relay/channel/deepseek"
 	"github.com/dengyie/apihub/relay/channel/dify"
+	"github.com/dengyie/apihub/relay/channel/fal"
 	"github.com/dengyie/apihub/relay/channel/gemini"
 	"github.com/dengyie/apihub/relay/channel/jev"
 	"github.com/dengyie/apihub/relay/channel/jimeng"
@@ -103,6 +104,8 @@ func GetAdaptor(apiType int) channel.Adaptor {
 		return &bivia.Adaptor{}
 	case constant.APITypeJev:
 		return &jev.Adaptor{}
+	case constant.APITypeFal:
+		return &fal.Adaptor{}
 	case constant.APITypeOpenRouter:
 		return &openai.Adaptor{}
 	case constant.APITypeXinference:
@@ -157,6 +160,8 @@ var taskPluginKeys = map[constant.TaskPlatform]string{
 	constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeSora)):        "sora",
 	constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeOpenAI)):      "sora",
 	constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeVertexAi)):    "vertex-ai",
+	constant.TaskPlatformFal:                                             "fal",
+	constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeFal)):         "fal",
 }
 
 func ResolveTaskPluginForPlatform(generation *pluginruntime.RoutingGeneration, platform constant.TaskPlatform) (*pluginruntime.LoadedPlugin, bool) {
@@ -192,6 +197,9 @@ func TaskPlatformUnavailableError(platform constant.TaskPlatform) (string, strin
 }
 
 func GetTaskAdaptor(platform constant.TaskPlatform) channel.TaskAdaptor {
+	if platform == constant.TaskPlatformFal || platform == constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeFal)) {
+		return &fal.TaskAdaptor{}
+	}
 	plugin, ok := ResolveTaskPluginForPlatform(pluginruntime.DefaultRegistry.Generation(), platform)
 	if !ok {
 		return nil
@@ -203,6 +211,9 @@ func GetTaskAdaptor(platform constant.TaskPlatform) channel.TaskAdaptor {
 // declarative or shared-endpoint router. Legacy task routes are pinned here
 // from one registry generation before the adaptor is returned.
 func getTaskAdaptorForRequest(c *gin.Context, platform constant.TaskPlatform) (constant.TaskPlatform, channel.TaskAdaptor) {
+	if platform == constant.TaskPlatformFal || platform == constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeFal)) {
+		return constant.TaskPlatformFal, &fal.TaskAdaptor{}
+	}
 	if c != nil {
 		if value, exists := c.Get(pluginruntime.ContextKeyPinnedPlugin); exists {
 			if pinned, ok := value.(pluginruntime.PinnedPlugin); ok && pinned.Plugin != nil {
