@@ -608,6 +608,7 @@ export const CHANNEL_TYPE_WARNINGS: Record<number, string> = {
 }
 
 export const FAL_MODELS = [
+  'fal-ai/any-llm',
   'minimax/h3-max/text-to-video',
   'minimax/h3-max/image-to-video',
   'fal-ai/kling-video/v3/pro/text-to-video',

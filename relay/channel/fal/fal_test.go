@@ -24,6 +24,8 @@ func TestNormalizeBaseURL(t *testing.T) {
 	assert.Equal(t, "https://queue.fal.run", NormalizeBaseURL("http://fal.run"))
 	assert.Equal(t, "https://queue.fal.run", NormalizeBaseURL("https://queue.fal.run/"))
 	assert.Equal(t, "https://custom.fal.proxy/v1", NormalizeBaseURL("https://custom.fal.proxy/v1/"))
+	assert.Equal(t, "https://fal.run/openrouter/router/openai/v1", NormalizeBaseURL("https://fal.run/fal-ai/any-llm/openai"))
+	assert.Equal(t, "https://fal.run/openrouter/router/openai/v1", NormalizeBaseURL("https://fal.run/openrouter/router/openai"))
 }
 
 func TestBuildRequestURLMultiSlash(t *testing.T) {
@@ -39,6 +41,17 @@ func TestBuildRequestURLMultiSlash(t *testing.T) {
 	url, err := adaptor.GetRequestURL(info)
 	require.NoError(t, err)
 	assert.Equal(t, "https://queue.fal.run/fal-ai/kling-video/v3/pro/text-to-video", url)
+
+	// Test OpenRouter endpoint
+	openRouterInfo := &relaycommon.RelayInfo{
+		OriginModelName: "openai/gpt-4o-mini",
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelBaseUrl: "https://fal.run/openrouter/router/openai/v1",
+		},
+	}
+	openRouterURL, err := adaptor.GetRequestURL(openRouterInfo)
+	require.NoError(t, err)
+	assert.Equal(t, "https://fal.run/openrouter/router/openai/v1/chat/completions", openRouterURL)
 
 	taskAdaptor := &TaskAdaptor{}
 	taskURL, err := taskAdaptor.BuildRequestURL(info)

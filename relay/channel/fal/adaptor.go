@@ -12,6 +12,7 @@ import (
 	"github.com/dengyie/apihub/common"
 	"github.com/dengyie/apihub/constant"
 	"github.com/dengyie/apihub/relay/channel"
+	"github.com/dengyie/apihub/relay/channel/openai"
 	relaycommon "github.com/dengyie/apihub/relay/common"
 	"github.com/dengyie/apihub/relaykit/dto"
 	"github.com/dengyie/apihub/relaykit/types"
@@ -32,6 +33,14 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 		baseURL = constant.GetChannelBaseURL(constant.ChannelTypeFal)
 	}
 	baseURL = NormalizeBaseURL(baseURL)
+
+	if IsOpenRouterEndpoint(baseURL) {
+		baseURL = strings.TrimRight(baseURL, "/")
+		if strings.HasSuffix(baseURL, "/chat/completions") {
+			return baseURL, nil
+		}
+		return baseURL + "/chat/completions", nil
+	}
 
 	var modelName string
 	if info.ChannelMeta != nil {
@@ -69,6 +78,9 @@ func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Header, info *rel
 }
 
 func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.GeneralOpenAIRequest) (any, error) {
+	if info != nil && IsOpenRouterEndpoint(info.ChannelBaseUrl) {
+		return request, nil
+	}
 	return CleanOpenAIRequest(c, info, request)
 }
 
@@ -136,6 +148,14 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 }
 
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (usage any, err *types.NewAPIError) {
+	if info != nil && IsOpenRouterEndpoint(info.ChannelBaseUrl) {
+		if info.IsStream {
+			return openai.OaiStreamHandler(c, info, resp)
+		} else {
+			return openai.OpenaiHandler(c, info, resp)
+		}
+	}
+
 	if resp == nil {
 		return nil, types.NewError(errors.New("upstream response is nil"), types.ErrorCodeBadResponse)
 	}

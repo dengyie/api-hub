@@ -784,13 +784,19 @@ func normalizeFalBaseURL(raw string) string {
 	if raw == "" {
 		return "https://queue.fal.run"
 	}
+	if strings.Contains(raw, "any-llm/openai") {
+		return "https://fal.run/openrouter/router/openai/v1"
+	}
+	if strings.HasSuffix(raw, "openrouter/router/openai") {
+		return raw + "/v1"
+	}
 	if raw == "https://fal.run" || raw == "http://fal.run" {
 		return "https://queue.fal.run"
 	}
-	if strings.HasPrefix(raw, "https://fal.run/") {
+	if strings.HasPrefix(raw, "https://fal.run/") && !strings.Contains(raw, "openrouter") {
 		return "https://queue.fal.run" + strings.TrimPrefix(raw, "https://fal.run")
 	}
-	if strings.HasPrefix(raw, "http://fal.run/") {
+	if strings.HasPrefix(raw, "http://fal.run/") && !strings.Contains(raw, "openrouter") {
 		return "http://queue.fal.run" + strings.TrimPrefix(raw, "http://fal.run")
 	}
 	return raw
