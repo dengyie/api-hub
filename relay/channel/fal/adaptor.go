@@ -323,8 +323,14 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 		return nil, types.NewError(fmt.Errorf("fal result parsing error: %w", vErr), types.ErrorCodeBadResponse)
 	}
 
-	// Render output as Markdown link and <video> tag
-	markdownOutput := fmt.Sprintf("[Click to watch video](%s)\n\n<video src=\"%s\" controls=\"controls\" width=\"100%%\"></video>", videoURL, videoURL)
+	// Render output as Markdown link and media tag
+	var markdownOutput string
+	lowerURL := strings.ToLower(videoURL)
+	if strings.HasSuffix(lowerURL, ".png") || strings.HasSuffix(lowerURL, ".jpg") || strings.HasSuffix(lowerURL, ".jpeg") || strings.HasSuffix(lowerURL, ".webp") {
+		markdownOutput = fmt.Sprintf("![Generated Image](%s)\n\n[Click to view image](%s)", videoURL, videoURL)
+	} else {
+		markdownOutput = fmt.Sprintf("[Click to watch video](%s)\n\n<video src=\"%s\" controls=\"controls\" width=\"100%%\"></video>", videoURL, videoURL)
+	}
 
 	chatUsage := &dto.Usage{
 		PromptTokens:     1,

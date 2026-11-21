@@ -676,3 +676,120 @@ func TestFalChatCompletionFastFailOn401And404(t *testing.T) {
 	// Verify it failed fast (< 3 seconds) instead of waiting 5 minutes
 	assert.Less(t, elapsed, 4*time.Second)
 }
+
+func TestCleanOpenAIRequestAspectRatioAndDuration(t *testing.T) {
+	req := &dto.GeneralOpenAIRequest{
+		Model: "fal-ai/kling-video/v3/pro/text-to-video",
+		Messages: []dto.Message{
+			{Role: "user", Content: "A timelapse of blooming cherry blossoms"},
+		},
+		Size: "1920x1080",
+	}
+
+	info := &relaycommon.RelayInfo{
+		OriginModelName: "fal-ai/kling-video/v3/pro/text-to-video",
+	}
+
+	cleaned, err := CleanOpenAIRequest(nil, info, req)
+	require.NoError(t, err)
+	assert.Equal(t, "16:9", cleaned["aspect_ratio"])
+	assert.Equal(t, "A timelapse of blooming cherry blossoms", cleaned["prompt"])
+
+	// Test square mapping
+	req.Size = "1024x1024"
+	cleanedSquare, err := CleanOpenAIRequest(nil, nil, req)
+	require.NoError(t, err)
+	assert.Equal(t, "1:1", cleanedSquare["aspect_ratio"])
+
+	// Test duration scaling
+	reqWithDuration := &dto.GeneralOpenAIRequest{
+		Model: "fal-ai/kling-video/v3/pro/text-to-video",
+		Messages: []dto.Message{
+			{Role: "user", Content: "A galloping horse"},
+		},
+		ExtraBody: []byte(`{"duration": 8.5}`),
+	}
+	infoDuration := &relaycommon.RelayInfo{}
+	cleanedDuration, err := CleanOpenAIRequest(nil, infoDuration, reqWithDuration)
+	require.NoError(t, err)
+	assert.Equal(t, 8.5, cleanedDuration["duration"])
+	assert.True(t, infoDuration.PriceData.HasOtherRatio("seconds"))
+	assert.Equal(t, 8.5, infoDuration.PriceData.OtherRatios()["seconds"])
+
+	// Test empty prompt validation
+	emptyReq := &dto.GeneralOpenAIRequest{
+		Model: "fal-ai/kling-video/v3/pro/text-to-video",
+		Messages: []dto.Message{
+			{Role: "user", Content: "   "},
+		},
+	}
+	_, errEmpty := CleanOpenAIRequest(nil, nil, emptyReq)
+	require.Error(t, errEmpty)
+	assert.Contains(t, errEmpty.Error(), "requires non-empty prompt")
+}
+
+func TestFalChatCompletionImageMarkdownOutput(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	baseURL := "https://queue.fal.run"
+
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = testRoundTripper(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.Method == http.MethodPost:
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body: io.NopCloser(bytes.NewReader([]byte(`{
+					"request_id": "req_img",
+					"status_url": "https://queue.fal.run/img-status",
+					"response_url": "https://queue.fal.run/img-result"
+				}`))),
+				Header: make(http.Header),
+			}, nil
+		case strings.HasSuffix(r.URL.Path, "img-status"):
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body: io.NopCloser(bytes.NewReader([]byte(`{
+					"status": "COMPLETED",
+					"response_url": "https://queue.fal.run/img-result"
+				}`))),
+				Header: make(http.Header),
+			}, nil
+		case strings.HasSuffix(r.URL.Path, "img-result"):
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body: io.NopCloser(bytes.NewReader([]byte(`{
+					"images": [{"url": "https://v.fal.media/photo.webp"}]
+				}`))),
+				Header: make(http.Header),
+			}, nil
+		default:
+			return &http.Response{StatusCode: http.StatusNotFound}, nil
+		}
+	})
+	defer func() { http.DefaultTransport = oldTransport }()
+
+	adaptor := &Adaptor{}
+	info := &relaycommon.RelayInfo{
+		OriginModelName: "fal-ai/flux-pro",
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelBaseUrl:    baseURL,
+			ApiKey:            "test-key",
+			UpstreamModelName: "fal-ai/flux-pro",
+		},
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	respAny, err := adaptor.DoRequest(c, info, strings.NewReader(`{"prompt":"test"}`))
+	require.NoError(t, err)
+
+	usage, apiErr := adaptor.DoResponse(c, respAny.(*http.Response), info)
+	require.Nil(t, apiErr)
+	assert.NotNil(t, usage)
+
+	body := w.Body.String()
+	assert.Contains(t, body, "![Generated Image](https://v.fal.media/photo.webp)")
+	assert.Contains(t, body, "[Click to view image]")
+}

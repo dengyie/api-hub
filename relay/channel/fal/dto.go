@@ -17,6 +17,8 @@ var candidateVideoPaths = []string{
 	"images.0.url",
 	"output.images.0.url",
 	"image.url",
+	"file.url",
+	"video.file_url",
 }
 
 type FalQueueSubmitResponse struct {

@@ -168,16 +168,53 @@ func CleanOpenAIRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dt
 	// Pass size as aspect_ratio if not set
 	if request.Size != "" {
 		if _, ok := payload["aspect_ratio"]; !ok {
-			payload["aspect_ratio"] = request.Size
+			payload["aspect_ratio"] = normalizeAspectRatio(request.Size)
 		}
 	}
 
-	// Validation
-	if payload["prompt"] == nil && payload["image_url"] == nil {
-		return nil, errors.New("fal video generation requires prompt or image_url")
+	// Extract and register duration ratio for billing if available
+	duration := ExtractDuration(payload)
+	if duration > 0 && info != nil {
+		info.PriceData.AddOtherRatio("seconds", duration)
+	}
+
+	// Strict non-empty validation
+	hasPrompt := false
+	if p, ok := payload["prompt"]; ok && p != nil {
+		if s, ok := p.(string); ok {
+			hasPrompt = strings.TrimSpace(s) != ""
+		} else {
+			hasPrompt = true
+		}
+	}
+	hasImage := false
+	if img, ok := payload["image_url"]; ok && img != nil {
+		if s, ok := img.(string); ok {
+			hasImage = strings.TrimSpace(s) != ""
+		} else {
+			hasImage = true
+		}
+	}
+	if !hasPrompt && !hasImage {
+		return nil, errors.New("fal video generation requires non-empty prompt or image_url")
 	}
 
 	return payload, nil
+}
+
+func normalizeAspectRatio(size string) string {
+	switch strings.ToLower(strings.TrimSpace(size)) {
+	case "16:9", "9:16", "1:1", "4:3", "3:4", "21:9":
+		return size
+	case "1920x1080", "1280x720", "1792x1024", "1024x576":
+		return "16:9"
+	case "1080x1920", "720x1280", "1024x1792", "576x1024":
+		return "9:16"
+	case "1024x1024", "512x512":
+		return "1:1"
+	default:
+		return size
+	}
 }
 
 func ExtractDuration(payload map[string]any) float64 {
