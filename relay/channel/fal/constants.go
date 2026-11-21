@@ -1,12 +1,12 @@
 package fal
 
 import (
-	"strings"
+	"github.com/dengyie/apihub/constant"
 )
 
 const (
 	ChannelName    = "fal"
-	DefaultBaseURL = "https://queue.fal.run"
+	DefaultBaseURL = constant.FalDefaultBaseURL
 )
 
 var ModelList = []string{
@@ -25,29 +25,9 @@ var ModelList = []string{
 }
 
 func NormalizeBaseURL(raw string) string {
-	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
-	if raw == "" {
-		return DefaultBaseURL
-	}
-	// fal-ai/any-llm/openai is deprecated/unpriced on fal.ai; openrouter router is the real endpoint
-	if strings.Contains(raw, "any-llm/openai") {
-		return "https://fal.run/openrouter/router/openai/v1"
-	}
-	if strings.HasSuffix(raw, "openrouter/router/openai") {
-		return raw + "/v1"
-	}
-	if raw == "https://fal.run" || raw == "http://fal.run" {
-		return DefaultBaseURL
-	}
-	if strings.HasPrefix(raw, "https://fal.run/") && !strings.Contains(raw, "openrouter") {
-		return DefaultBaseURL + strings.TrimPrefix(raw, "https://fal.run")
-	}
-	if strings.HasPrefix(raw, "http://fal.run/") && !strings.Contains(raw, "openrouter") {
-		return "http://queue.fal.run" + strings.TrimPrefix(raw, "http://fal.run")
-	}
-	return raw
+	return constant.NormalizeFalBaseURL(raw)
 }
 
 func IsOpenRouterEndpoint(raw string) bool {
-	return strings.Contains(raw, "openrouter") || strings.Contains(raw, "any-llm/openai")
+	return constant.IsFalOpenRouterEndpoint(raw)
 }

@@ -774,32 +774,9 @@ func (channel *Channel) GetBaseURL() string {
 		url = constant.GetChannelBaseURL(channel.Type)
 	}
 	if channel.Type == constant.ChannelTypeFal {
-		url = normalizeFalBaseURL(url)
+		url = constant.NormalizeFalBaseURL(url)
 	}
 	return url
-}
-
-func normalizeFalBaseURL(raw string) string {
-	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
-	if raw == "" {
-		return "https://queue.fal.run"
-	}
-	if strings.Contains(raw, "any-llm/openai") {
-		return "https://fal.run/openrouter/router/openai/v1"
-	}
-	if strings.HasSuffix(raw, "openrouter/router/openai") {
-		return raw + "/v1"
-	}
-	if raw == "https://fal.run" || raw == "http://fal.run" {
-		return "https://queue.fal.run"
-	}
-	if strings.HasPrefix(raw, "https://fal.run/") && !strings.Contains(raw, "openrouter") {
-		return "https://queue.fal.run" + strings.TrimPrefix(raw, "https://fal.run")
-	}
-	if strings.HasPrefix(raw, "http://fal.run/") && !strings.Contains(raw, "openrouter") {
-		return "http://queue.fal.run" + strings.TrimPrefix(raw, "http://fal.run")
-	}
-	return raw
 }
 
 func (channel *Channel) GetModelMapping() string {

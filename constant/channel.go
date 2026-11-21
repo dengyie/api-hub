@@ -1,5 +1,9 @@
 package constant
 
+import (
+	"strings"
+)
+
 const (
 	ChannelTypeUnknown        = 0
 	ChannelTypeOpenAI         = 1
@@ -145,6 +149,35 @@ func GetChannelBaseURL(channelType int) string {
 		return ""
 	}
 	return ChannelBaseURLs[channelType]
+}
+
+const FalDefaultBaseURL = "https://queue.fal.run"
+
+func NormalizeFalBaseURL(raw string) string {
+	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
+	if raw == "" {
+		return FalDefaultBaseURL
+	}
+	if strings.Contains(raw, "any-llm/openai") {
+		return "https://fal.run/openrouter/router/openai/v1"
+	}
+	if strings.HasSuffix(raw, "openrouter/router/openai") {
+		return raw + "/v1"
+	}
+	if raw == "https://fal.run" || raw == "http://fal.run" {
+		return FalDefaultBaseURL
+	}
+	if strings.HasPrefix(raw, "https://fal.run/") && !strings.Contains(raw, "openrouter") {
+		return FalDefaultBaseURL + strings.TrimPrefix(raw, "https://fal.run")
+	}
+	if strings.HasPrefix(raw, "http://fal.run/") && !strings.Contains(raw, "openrouter") {
+		return "http://queue.fal.run" + strings.TrimPrefix(raw, "http://fal.run")
+	}
+	return raw
+}
+
+func IsFalOpenRouterEndpoint(raw string) bool {
+	return strings.Contains(raw, "openrouter") || strings.Contains(raw, "any-llm/openai")
 }
 
 var ChannelTypeNames = map[int]string{
