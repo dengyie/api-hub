@@ -231,7 +231,9 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 
 		case <-heartbeatTicker.C:
 			if info.IsStream {
-				_, _ = c.Writer.Write(sseKeepAlive)
+				if _, wErr := c.Writer.Write(sseKeepAlive); wErr != nil {
+					return nil, types.NewError(wErr, types.ErrorCodeClientAborted)
+				}
 				c.Writer.Flush()
 			}
 
@@ -251,7 +253,21 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 
 			statusBody, sReadErr := io.ReadAll(io.LimitReader(statusResp.Body, 512<<10))
 			statusResp.Body.Close()
-			if sReadErr != nil || statusResp.StatusCode >= 400 {
+			if sReadErr != nil {
+				continue
+			}
+
+			if statusResp.StatusCode == http.StatusUnauthorized ||
+				statusResp.StatusCode == http.StatusForbidden ||
+				statusResp.StatusCode == http.StatusNotFound {
+				finalFailReason = ExtractErrorMsg(statusBody)
+				if finalFailReason == "" {
+					finalFailReason = fmt.Sprintf("upstream fal status returned HTTP %d", statusResp.StatusCode)
+				}
+				return nil, types.NewError(errors.New(finalFailReason), types.ErrorCodeBadResponse)
+			}
+
+			if statusResp.StatusCode >= 400 {
 				continue
 			}
 

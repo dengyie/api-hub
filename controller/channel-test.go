@@ -20,6 +20,7 @@ import (
 	"github.com/dengyie/apihub/model"
 	"github.com/dengyie/apihub/pkg/billingexpr"
 	"github.com/dengyie/apihub/relay"
+	"github.com/dengyie/apihub/relay/channel/fal"
 	relaycommon "github.com/dengyie/apihub/relay/common"
 	relayconstant "github.com/dengyie/apihub/relay/constant"
 	"github.com/dengyie/apihub/relay/helper"
@@ -184,9 +185,9 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 		constant.ChannelTypeDoubaoVideo,
 		constant.ChannelTypeVidu,
 		constant.ChannelTypeTaskPlugin,
-		constant.ChannelTypeFal,
 	}
-	if lo.Contains(unsupportedTestChannelTypes, channel.Type) {
+	if lo.Contains(unsupportedTestChannelTypes, channel.Type) ||
+		(channel.Type == constant.ChannelTypeFal && !fal.IsOpenRouterEndpoint(channel.GetBaseURL())) {
 		channelTypeName := constant.GetChannelTypeName(channel.Type)
 		return testResult{
 			localErr: fmt.Errorf("%s channel test is not supported", channelTypeName),

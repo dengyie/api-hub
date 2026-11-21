@@ -43,7 +43,7 @@ func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycom
 	var bodyBytes []byte
 	if c.Request.Body != nil {
 		var err error
-		bodyBytes, err = io.ReadAll(c.Request.Body)
+		bodyBytes, err = io.ReadAll(io.LimitReader(c.Request.Body, 10<<20))
 		if err != nil {
 			return service.TaskErrorWrapperLocal(err, "read_request_body_failed", http.StatusBadRequest)
 		}
@@ -256,6 +256,7 @@ func (a *TaskAdaptor) ParseResponse(c *gin.Context, resp *http.Response, info *r
 	return &channel.TaskSubmitResponse{
 		UpstreamTaskID: submitResp.RequestID,
 		TaskData:       taskDataBytes,
+		PluginState:    taskDataBytes,
 	}, nil
 }
 
@@ -273,7 +274,12 @@ func (a *TaskAdaptor) FetchTask(baseURL, key string, task *model.Task, proxy str
 	}
 
 	var taskData FalTaskData
-	_ = task.GetData(&taskData)
+	if len(task.PrivateData.PluginState) > 0 {
+		_ = common.Unmarshal(task.PrivateData.PluginState, &taskData)
+	}
+	if taskData.StatusURL == "" {
+		_ = task.GetData(&taskData)
+	}
 
 	// Verbatim status_url must be used
 	statusURL := taskData.StatusURL
@@ -314,14 +320,20 @@ func (a *TaskAdaptor) ParseTaskResult(task *model.Task, resp *http.Response, res
 		}, nil
 	}
 
+	var taskData FalTaskData
+	if len(task.PrivateData.PluginState) > 0 {
+		_ = common.Unmarshal(task.PrivateData.PluginState, &taskData)
+	}
+	if taskData.ResponseURL == "" {
+		_ = task.GetData(&taskData)
+	}
+
 	status := gjson.GetBytes(respBody, "status").String()
 
 	if strings.EqualFold(status, "COMPLETED") {
 		// Use verbatim response_url
 		responseURL := gjson.GetBytes(respBody, "response_url").String()
 		if responseURL == "" {
-			var taskData FalTaskData
-			_ = task.GetData(&taskData)
 			responseURL = taskData.ResponseURL
 		}
 		if responseURL == "" {
@@ -362,14 +374,14 @@ func (a *TaskAdaptor) ParseTaskResult(task *model.Task, resp *http.Response, res
 			return nil, fmt.Errorf("failed to extract video url: %w", err)
 		}
 
-		var taskData FalTaskData
-		_ = task.GetData(&taskData)
 		taskData.VideoURL = videoURL
+		taskDataBytes, _ := common.Marshal(taskData)
 		task.SetData(taskData)
 		return &relaycommon.TaskInfo{
-			Status:   string(model.TaskStatusSuccess),
-			Progress: "100%",
-			Url:      videoURL,
+			Status:      string(model.TaskStatusSuccess),
+			Progress:    "100%",
+			Url:         videoURL,
+			PluginState: taskDataBytes,
 		}, nil
 	}
 
@@ -384,10 +396,13 @@ func (a *TaskAdaptor) ParseTaskResult(task *model.Task, resp *http.Response, res
 		}, nil
 	}
 
+	taskDataBytes, _ := common.Marshal(taskData)
+
 	if strings.EqualFold(status, "IN_PROGRESS") {
 		return &relaycommon.TaskInfo{
-			Status:   string(model.TaskStatusInProgress),
-			Progress: "50%",
+			Status:      string(model.TaskStatusInProgress),
+			Progress:    "50%",
+			PluginState: taskDataBytes,
 		}, nil
 	}
 
@@ -397,14 +412,16 @@ func (a *TaskAdaptor) ParseTaskResult(task *model.Task, resp *http.Response, res
 			progress = fmt.Sprintf("queue pos: %d", qPos.Int())
 		}
 		return &relaycommon.TaskInfo{
-			Status:   string(model.TaskStatusQueued),
-			Progress: progress,
+			Status:      string(model.TaskStatusQueued),
+			Progress:    progress,
+			PluginState: taskDataBytes,
 		}, nil
 	}
 
 	return &relaycommon.TaskInfo{
-		Status:   string(model.TaskStatusInProgress),
-		Progress: "30%",
+		Status:      string(model.TaskStatusInProgress),
+		Progress:    "30%",
+		PluginState: taskDataBytes,
 	}, nil
 }
 

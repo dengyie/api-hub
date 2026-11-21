@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dengyie/apihub/common"
 	"github.com/dengyie/apihub/model"
@@ -550,4 +551,128 @@ func BenchmarkParseTaskResultPolling(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+}
+
+func TestTaskAdaptorPluginStatePersistenceAcrossPolls(t *testing.T) {
+	baseURL := "https://queue.fal.run"
+	taskAdaptor := &TaskAdaptor{}
+
+	submitJSON := `{"request_id":"req_state_test","status_url":"https://queue.fal.run/custom-owner/app/requests/req_state_test/status","response_url":"https://queue.fal.run/custom-owner/app/requests/req_state_test"}`
+	submitResp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(submitJSON)),
+	}
+
+	relayInfo := &relaycommon.RelayInfo{
+		OriginModelName: "fal-ai/kling-video/v3/pro/text-to-video",
+	}
+
+	parsed, taskErr := taskAdaptor.ParseResponse(nil, submitResp, relayInfo)
+	require.Nil(t, taskErr)
+	assert.NotEmpty(t, parsed.PluginState)
+
+	// Simulate Task created with PluginState and Data
+	task := &model.Task{
+		TaskID: "req_state_test",
+		Data:   parsed.TaskData,
+		PrivateData: model.TaskPrivateData{
+			Key:         "test-key",
+			PluginState: parsed.PluginState,
+		},
+	}
+
+	// Simulate service.updateVideoSingleTask overwriting task.Data with raw poll response!
+	// (This was the root cause of P1 bug where task.Data got wiped)
+	task.Data = []byte(`{"status":"IN_PROGRESS","queue_position":1}`)
+
+	var requestedURL string
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = testRoundTripper(func(r *http.Request) (*http.Response, error) {
+		requestedURL = r.URL.String()
+		if strings.HasSuffix(r.URL.Path, "/status") {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"status":"COMPLETED"}`)),
+				Header:     make(http.Header),
+			}, nil
+		}
+		if strings.HasSuffix(r.URL.Path, "req_state_test") {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"video":{"url":"https://v.fal.media/done.mp4"}}`)),
+				Header:     make(http.Header),
+			}, nil
+		}
+		return &http.Response{StatusCode: http.StatusNotFound}, nil
+	})
+	defer func() { http.DefaultTransport = oldTransport }()
+
+	// Poll 2: FetchTask must read from PluginState and use the verbatim status_url!
+	resp, err := taskAdaptor.FetchTask(baseURL, "test-key", task, "")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, "https://queue.fal.run/custom-owner/app/requests/req_state_test/status", requestedURL)
+
+	b, _ := io.ReadAll(resp.Body)
+	taskInfo, err := taskAdaptor.ParseTaskResult(task, resp, b)
+	require.NoError(t, err)
+	assert.Equal(t, string(model.TaskStatusSuccess), taskInfo.Status)
+	assert.Equal(t, "https://v.fal.media/done.mp4", taskInfo.Url)
+	assert.NotEmpty(t, taskInfo.PluginState)
+}
+
+func TestFalChatCompletionFastFailOn401And404(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	baseURL := "https://queue.fal.run"
+
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = testRoundTripper(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.Method == http.MethodPost:
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body: io.NopCloser(bytes.NewReader([]byte(`{
+					"request_id": "req_fast_fail",
+					"status_url": "https://queue.fal.run/unauth-status",
+					"response_url": "https://queue.fal.run/unauth-res"
+				}`))),
+				Header: make(http.Header),
+			}, nil
+		case strings.HasSuffix(r.URL.Path, "unauth-status"):
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Body:       io.NopCloser(strings.NewReader(`{"detail":"Invalid API Key"}`)),
+				Header:     make(http.Header),
+			}, nil
+		default:
+			return &http.Response{StatusCode: http.StatusNotFound}, nil
+		}
+	})
+	defer func() { http.DefaultTransport = oldTransport }()
+
+	adaptor := &Adaptor{}
+	info := &relaycommon.RelayInfo{
+		OriginModelName: "fal-ai/kling-video/v3/pro/text-to-video",
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelBaseUrl:    baseURL,
+			ApiKey:            "bad-key",
+			UpstreamModelName: "fal-ai/kling-video/v3/pro/text-to-video",
+		},
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	respAny, err := adaptor.DoRequest(c, info, strings.NewReader(`{"prompt":"test"}`))
+	require.NoError(t, err)
+
+	start := time.Now()
+	_, apiErr := adaptor.DoResponse(c, respAny.(*http.Response), info)
+	elapsed := time.Since(start)
+
+	require.NotNil(t, apiErr)
+	assert.Contains(t, apiErr.Error(), "Invalid API Key")
+	// Verify it failed fast (< 3 seconds) instead of waiting 5 minutes
+	assert.Less(t, elapsed, 4*time.Second)
 }
