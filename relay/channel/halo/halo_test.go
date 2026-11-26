@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 func TestNormalizeBaseURL(t *testing.T) {
@@ -308,6 +309,67 @@ func TestDoRequestStopsOnUnavailableQuote(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "quote_token")
 	assert.Equal(t, []string{"/api/v1/generation/preview"}, paths)
+}
+
+// TestDoRequestUsesStableIdempotencyKey verifies that the same logical request
+// reuses one conversation across retries (PublicTaskID is generated once per
+// logical submit), so a retry cannot create a second charged message.
+func TestDoRequestUsesStableIdempotencyKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var seenKeys []string
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/api/v1/generation/preview":
+			return jsonResponse(200, `{"quote_token":"qt-1","available":true}`), nil
+		case "/api/v1/conversations":
+			body, _ := io.ReadAll(r.Body)
+			seenKeys = append(seenKeys, gjson.GetBytes(body, "idempotency_key").String())
+			return jsonResponse(200, `{"id":"conv-1"}`), nil
+		case "/api/v1/conversations/conv-1/messages":
+			return jsonResponse(200, `{"jobs":[{"id":"job-1"}]}`), nil
+		}
+		return jsonResponse(404, `{}`), nil
+	})
+	defer func() { http.DefaultTransport = oldTransport }()
+
+	for i := 0; i < 2; i++ { // two gateway retries of the same logical request
+		c, _ := gin.CreateTestContext(nil)
+		c.Request = httptestRequest(t, `{"model":"halo-video","prompt":"a cat"}`)
+		adaptor := &TaskAdaptor{}
+		info := &relaycommon.RelayInfo{
+			OriginModelName: "halo-video",
+			TaskRelayInfo:   &relaycommon.TaskRelayInfo{PublicTaskID: "task_stable_123"},
+			ChannelMeta: &relaycommon.ChannelMeta{
+				UpstreamModelName: "halo-video",
+				ChannelBaseUrl:    "https://halo.video",
+				ApiKey:            "vgn_test_key",
+			},
+		}
+		adaptor.Init(info)
+		body, err := adaptor.BuildRequestBody(c, info)
+		require.NoError(t, err)
+		_, err = adaptor.DoRequest(c, info, body)
+		require.NoError(t, err)
+	}
+
+	assert.Equal(t, []string{"mangoapi-task_stable_123", "mangoapi-task_stable_123"}, seenKeys)
+}
+
+func TestValidateRequestRejectsOutOfRangeDuration(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, body := range []string{
+		`{"model":"halo-video","prompt":"x","duration":999999}`,
+		`{"model":"halo-video","prompt":"x","seconds":0}`,
+	} {
+		c, _ := gin.CreateTestContext(nil)
+		c.Request = httptestRequest(t, body)
+		adaptor := &TaskAdaptor{}
+		taskErr := adaptor.ValidateRequestAndSetAction(c, &relaycommon.RelayInfo{})
+		require.NotNil(t, taskErr, "body: %s", body)
+		assert.Equal(t, http.StatusBadRequest, taskErr.StatusCode)
+	}
 }
 
 func httptestRequest(t *testing.T, body string) *http.Request {

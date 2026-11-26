@@ -18,6 +18,7 @@ import (
 	"github.com/dengyie/apihub/common"
 	"github.com/dengyie/apihub/logger"
 	"github.com/dengyie/apihub/model"
+	"github.com/dengyie/apihub/relay"
 	relaychannel "github.com/dengyie/apihub/relay/channel"
 	"github.com/dengyie/apihub/service"
 	"github.com/dengyie/apihub/setting/system_setting"
@@ -83,6 +84,10 @@ func VideoProxy(c *gin.Context) {
 	}
 
 	var descriptor *relaychannel.TaskContentRequest
+	clientReq := relaychannel.TaskArtifactClientRequest{
+		Method:  c.Request.Method,
+		Headers: taskArtifactClientHeaders(c.Request.Header),
+	}
 	if taskHasPluginExecution(task) {
 		artifacts, projectionErr := projectTaskArtifacts(task)
 		if projectionErr == nil {
@@ -93,10 +98,7 @@ func VideoProxy(c *gin.Context) {
 				adaptor, adaptorErr := initTaskArtifactAdaptor(task)
 				if adaptorErr == nil {
 					if provider, ok := adaptor.(relaychannel.TaskContentRequestProvider); ok {
-						descriptor, adaptorErr = provider.BuildContentRequest(task, artifact.Key, relaychannel.TaskArtifactClientRequest{
-							Method:  c.Request.Method,
-							Headers: taskArtifactClientHeaders(c.Request.Header),
-						})
+						descriptor, adaptorErr = provider.BuildContentRequest(task, artifact.Key, clientReq)
 					}
 				}
 				if adaptorErr != nil {
@@ -107,6 +109,21 @@ func VideoProxy(c *gin.Context) {
 			}
 		} else {
 			logger.LogWarn(c.Request.Context(), fmt.Sprintf("Failed to project plugin video for task %s", taskID))
+		}
+	}
+	// Native task adaptors (e.g. halo) serve authed upstream media even though
+	// their tasks carry no plugin execution. Without this branch the fallback
+	// below sees our own /v1/videos/{id}/content result URL, detects a proxy
+	// loop and returns 410 — the client can never download the media.
+	if descriptor == nil && !taskHasPluginExecution(task) {
+		adaptor := relay.GetTaskAdaptor(task.Platform)
+		if provider, ok := adaptor.(relaychannel.TaskContentRequestProvider); ok {
+			built, buildErr := provider.BuildContentRequest(task, "video", clientReq)
+			if buildErr != nil {
+				logger.LogWarn(c.Request.Context(), fmt.Sprintf("Failed to resolve native video content for task %s: %v", taskID, buildErr))
+			} else {
+				descriptor = built
+			}
 		}
 	}
 	if descriptor == nil {

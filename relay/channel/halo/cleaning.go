@@ -7,15 +7,6 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// openAIFieldsToOmit are client envelope fields that must never reach the
-// upstream halo payload.
-var openAIFieldsToOmit = map[string]bool{
-	"model": true, "messages": true, "stream": true, "temperature": true,
-	"top_p": true, "max_tokens": true, "user": true, "n": true, "stop": true,
-	"presence_penalty": true, "frequency_penalty": true, "logit_bias": true,
-	"response_format": true, "tools": true, "tool_choice": true,
-}
-
 // BuildGenerationPayload converts an OpenAI-style task request (chat messages
 // or prompt field) into halo's generation payload: top-level content plus
 // parameters block. Supported client hints (all optional, sensible upstream

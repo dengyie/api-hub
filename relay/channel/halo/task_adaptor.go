@@ -74,6 +74,18 @@ func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycom
 				info.UpstreamModelName = m
 			}
 		}
+		// Duration drives per-second pre-charge; reject absurd values before
+		// any quota multiplication happens (upstream products cap at ~10s).
+		if d := res.Get("duration"); d.Exists() && (d.Float() <= 0 || d.Float() > MaxDurationSeconds) {
+			return service.TaskErrorWrapperLocal(
+				fmt.Errorf("halo adaptor: duration must be within (0, %v] seconds", MaxDurationSeconds),
+				"invalid_request", http.StatusBadRequest)
+		}
+		if s := res.Get("seconds"); !res.Get("duration").Exists() && s.Exists() && (s.Float() <= 0 || s.Float() > MaxDurationSeconds) {
+			return service.TaskErrorWrapperLocal(
+				fmt.Errorf("halo adaptor: seconds must be within (0, %v]", MaxDurationSeconds),
+				"invalid_request", http.StatusBadRequest)
+		}
 	}
 
 	if info != nil && info.Action == "" {
@@ -185,7 +197,13 @@ func (a *TaskAdaptor) doUpstream(c *gin.Context, info *relaycommon.RelayInfo, me
 		client = http.DefaultClient
 	}
 	if info != nil && info.ChannelSetting.Proxy != "" {
-		if proxyClient, err := service.GetHttpClientWithProxy(info.ChannelSetting.Proxy); err == nil && proxyClient != nil {
+		proxyClient, proxyErr := service.GetHttpClientWithProxy(info.ChannelSetting.Proxy)
+		if proxyErr != nil || proxyClient == nil {
+			// Proxy misconfig must not silently degrade to direct egress: for
+			// channels whose upstream is only reachable via the proxy pool a
+			// silent fallback turns every request into a confusing timeout.
+			common.SysLog(fmt.Sprintf("halo adaptor: proxy client unavailable (proxy=%s): %v — falling back to direct egress", info.ChannelSetting.Proxy, proxyErr))
+		} else {
 			client = proxyClient
 		}
 	}
@@ -281,17 +299,22 @@ func (a *TaskAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, req
 		return nil, fmt.Errorf("halo quote unavailable: %s", ExtractErrorMsg(quoteRespBody))
 	}
 
-	// Step 2: create conversation with a deterministic idempotency key.
+	// Step 2: create conversation with a deterministic idempotency key. The
+	// gateway-generated PublicTaskID survives channel retries within one
+	// logical request, so a retried submit reuses the same conversation
+	// instead of creating a second charged one. Client-supplied keys win.
+	idempotencyKey := strings.TrimSpace(gjson.GetBytes(raw, "idempotency_key").String())
+	if idempotencyKey == "" && info != nil && info.TaskRelayInfo != nil {
+		idempotencyKey = strings.TrimSpace(info.PublicTaskID)
+	}
+	if idempotencyKey == "" {
+		idempotencyKey = fmt.Sprintf("t%d", common.GetTimestamp())
+	}
 	convBody, err := common.Marshal(map[string]any{
-		"idempotency_key": fmt.Sprintf("mangoapi-%s", gjson.GetBytes(raw, "idempotency_key").String()),
+		"idempotency_key": "mangoapi-" + idempotencyKey,
 	})
 	if err != nil {
 		return nil, err
-	}
-	if gjson.GetBytes(convBody, "idempotency_key").String() == "mangoapi-" {
-		convBody, _ = common.Marshal(map[string]any{
-			"idempotency_key": fmt.Sprintf("mangoapi-%d", common.GetTimestamp()),
-		})
 	}
 	convRespBody, status, err := a.doUpstream(c, info, http.MethodPost, apiRoot+"/conversations", convBody, 1<<20)
 	if err != nil {
@@ -399,7 +422,10 @@ func (a *TaskAdaptor) FetchTask(baseURL, key string, task *model.Task, proxy str
 		client = http.DefaultClient
 	}
 	if proxy != "" {
-		if proxyClient, err := service.GetHttpClientWithProxy(proxy); err == nil && proxyClient != nil {
+		proxyClient, proxyErr := service.GetHttpClientWithProxy(proxy)
+		if proxyErr != nil || proxyClient == nil {
+			common.SysLog(fmt.Sprintf("halo adaptor: poll proxy client unavailable (proxy=%s): %v — falling back to direct egress", proxy, proxyErr))
+		} else {
 			client = proxyClient
 		}
 	}
@@ -487,7 +513,10 @@ func ContentProxyURL(taskID string) string {
 
 // BuildContentRequest serves the final video through the content proxy:
 // halo's media endpoint requires the channel Bearer key, which must not be
-// forwarded to clients, so the proxy injects it here.
+// forwarded to clients, so the proxy injects it here. The key is resolved
+// per-call from the channel cache (falling back to task.PrivateData.Key) —
+// never from shared adaptor state, since the polling/content paths may reuse
+// one adaptor instance across tasks and channels.
 func (a *TaskAdaptor) BuildContentRequest(task *model.Task, artifactKey string, clientRequest channel.TaskArtifactClientRequest) (*channel.TaskContentRequest, error) {
 	if task == nil {
 		return nil, errors.New("task is nil")
@@ -503,15 +532,16 @@ func (a *TaskAdaptor) BuildContentRequest(task *model.Task, artifactKey string, 
 		return nil, errors.New("halo task state missing job_id")
 	}
 
-	var info relaycommon.RelayInfo
-	a.Init(&info)
-
+	apiKey := task.PrivateData.Key
 	baseURL := ""
 	if channelModel, err := model.CacheGetChannel(task.ChannelId); err == nil && channelModel != nil {
 		baseURL = channelModel.GetBaseURL()
-		if a.cachedAPIKey == "" {
-			a.cachedAPIKey = channelModel.Key
+		if apiKey == "" {
+			apiKey = channelModel.Key
 		}
+	}
+	if apiKey == "" {
+		return nil, errors.New("halo channel key unavailable for content proxy")
 	}
 	root := NormalizeBaseURL(baseURL)
 	if root == "" {
@@ -519,9 +549,8 @@ func (a *TaskAdaptor) BuildContentRequest(task *model.Task, artifactKey string, 
 	}
 
 	mediaURL := root + "/api/v1/jobs/" + taskData.JobID + "/media"
-	headers := map[string]string{}
-	if a.cachedAPIKey != "" {
-		headers["Authorization"] = "Bearer " + a.cachedAPIKey
+	headers := map[string]string{
+		"Authorization": "Bearer " + apiKey,
 	}
 	for k, v := range clientRequest.Headers {
 		headers[k] = v

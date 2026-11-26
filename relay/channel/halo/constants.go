@@ -20,6 +20,10 @@ import (
 const (
 	ChannelName    = "halo"
 	DefaultBaseURL = constant.HaloDefaultBaseURL
+
+	// MaxDurationSeconds bounds the per-second billing multiplier so a single
+	// request cannot pre-charge an unbounded quota amount before preview.
+	MaxDurationSeconds = 60
 )
 
 // NormalizeBaseURL strips the site's /api suffix so callers always work from
