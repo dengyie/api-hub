@@ -68,6 +68,7 @@ const (
 	ChannelTypeBivia          = 64
 	ChannelTypeJev            = 65
 	ChannelTypeFal            = 66
+	ChannelTypeHalo           = 67
 	ChannelTypeDummy          // this one is only for count, do not add any channel after this
 
 )
@@ -142,6 +143,7 @@ var ChannelBaseURLs = []string{
 	"https://api.articul8.ai",                   //64
 	"",                                          //65
 	"https://queue.fal.run",                     //66
+	"https://halo.video",                        //67
 }
 
 func GetChannelBaseURL(channelType int) string {
@@ -152,6 +154,8 @@ func GetChannelBaseURL(channelType int) string {
 }
 
 const FalDefaultBaseURL = "https://queue.fal.run"
+
+const HaloDefaultBaseURL = "https://halo.video"
 
 func NormalizeFalBaseURL(raw string) string {
 	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
@@ -178,6 +182,18 @@ func NormalizeFalBaseURL(raw string) string {
 
 func IsFalOpenRouterEndpoint(raw string) bool {
 	return strings.Contains(raw, "openrouter") || strings.Contains(raw, "any-llm/openai")
+}
+
+// NormalizeHaloBaseURL strips the site's /api suffix so callers can always
+// append "/api/v1/..." themselves.
+func NormalizeHaloBaseURL(raw string) string {
+	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
+	if raw == "" {
+		return HaloDefaultBaseURL
+	}
+	raw = strings.TrimSuffix(raw, "/api/v1")
+	raw = strings.TrimSuffix(raw, "/api")
+	return strings.TrimRight(raw, "/")
 }
 
 var ChannelTypeNames = map[int]string{
@@ -244,6 +260,7 @@ var ChannelTypeNames = map[int]string{
 	ChannelTypeBivia:          "Bivia",
 	ChannelTypeJev:            "Jev",
 	ChannelTypeFal:            "Fal",
+	ChannelTypeHalo:           "Halo",
 }
 
 func GetChannelTypeName(channelType int) string {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,6 +41,11 @@ func init() {
 			continue
 		}
 		adaptor := relay.GetAdaptor(i)
+		// Pure task-relay types (e.g. halo) have no chat adaptor; they expose
+		// no /v1/models entries and are served through the task engine.
+		if adaptor == nil {
+			continue
+		}
 		channelName := adaptor.GetChannelName()
 		modelNames := adaptor.GetModelList()
 		for _, modelName := range modelNames {
@@ -108,6 +114,18 @@ func init() {
 			ChannelType: i,
 		}}
 		adaptor := relay.GetAdaptor(apiType)
+		// Pure task-relay types (e.g. halo) have no chat adaptor; their model
+		// list comes from the task adaptor below.
+		if adaptor == nil {
+			if taskAdaptor := relay.GetTaskAdaptor(constant.TaskPlatform(strconv.Itoa(i))); taskAdaptor != nil {
+				channelId2Models[i] = taskAdaptor.GetModelList()
+				continue
+			}
+			if plugin, ok := jsplugin.DefaultRegistry.GetByChannelType(i); ok {
+				channelId2Models[i] = append([]string(nil), plugin.Meta.Models...)
+			}
+			continue
+		}
 		adaptor.Init(meta)
 		channelId2Models[i] = adaptor.GetModelList()
 		if len(channelId2Models[i]) == 0 {

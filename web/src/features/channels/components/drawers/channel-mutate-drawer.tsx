@@ -147,9 +147,11 @@ import {
   CHANNEL_TYPE_VLLM,
   CHANNEL_TYPE_SGLANG,
   CHANNEL_TYPE_FAL,
+  CHANNEL_TYPE_HALO,
   CHANNEL_TYPE_WARNINGS,
   ERROR_MESSAGES,
   FAL_MODELS,
+  HALO_MODELS,
   FIELD_PASSTHROUGH_TYPES,
   FIELD_DESCRIPTIONS,
   FIELD_PLACEHOLDERS,
@@ -730,6 +732,9 @@ export function ChannelMutateDrawer({
     if (currentType === CHANNEL_TYPE_FAL) {
       return FAL_MODELS
     }
+    if (currentType === CHANNEL_TYPE_HALO) {
+      return HALO_MODELS
+    }
     if (!allModelsList.length) return []
     // Filter models based on common patterns for specific types
     if (currentType === 1) {
@@ -1101,6 +1106,14 @@ export function ChannelMutateDrawer({
       const currentBaseUrlValue = form.getValues('base_url')
       if (!currentBaseUrlValue || currentBaseUrlValue === '') {
         form.setValue('base_url', 'https://queue.fal.run')
+      }
+    }
+
+    // Type Halo (67) - set default base_url
+    if (currentType === CHANNEL_TYPE_HALO) {
+      const currentBaseUrlValue = form.getValues('base_url')
+      if (!currentBaseUrlValue || currentBaseUrlValue === '') {
+        form.setValue('base_url', 'https://halo.video')
       }
     }
 

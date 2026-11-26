@@ -776,6 +776,9 @@ func (channel *Channel) GetBaseURL() string {
 	if channel.Type == constant.ChannelTypeFal {
 		url = constant.NormalizeFalBaseURL(url)
 	}
+	if channel.Type == constant.ChannelTypeHalo {
+		url = constant.NormalizeHaloBaseURL(url)
+	}
 	return url
 }
 

@@ -23,6 +23,7 @@ import (
 	"github.com/dengyie/apihub/relay/channel/dify"
 	"github.com/dengyie/apihub/relay/channel/fal"
 	"github.com/dengyie/apihub/relay/channel/gemini"
+	"github.com/dengyie/apihub/relay/channel/halo"
 	"github.com/dengyie/apihub/relay/channel/jev"
 	"github.com/dengyie/apihub/relay/channel/jimeng"
 	"github.com/dengyie/apihub/relay/channel/jina"
@@ -198,6 +199,9 @@ func GetTaskAdaptor(platform constant.TaskPlatform) channel.TaskAdaptor {
 	if platform == constant.TaskPlatformFal || platform == constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeFal)) {
 		return &fal.TaskAdaptor{}
 	}
+	if platform == constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeHalo)) {
+		return &halo.TaskAdaptor{}
+	}
 	plugin, ok := ResolveTaskPluginForPlatform(pluginruntime.DefaultRegistry.Generation(), platform)
 	if !ok {
 		return nil
@@ -211,6 +215,9 @@ func GetTaskAdaptor(platform constant.TaskPlatform) channel.TaskAdaptor {
 func getTaskAdaptorForRequest(c *gin.Context, platform constant.TaskPlatform) (constant.TaskPlatform, channel.TaskAdaptor) {
 	if platform == constant.TaskPlatformFal || platform == constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeFal)) {
 		return constant.TaskPlatformFal, &fal.TaskAdaptor{}
+	}
+	if platform == constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeHalo)) {
+		return constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeHalo)), &halo.TaskAdaptor{}
 	}
 	if c != nil {
 		if value, exists := c.Get(pluginruntime.ContextKeyPinnedPlugin); exists {

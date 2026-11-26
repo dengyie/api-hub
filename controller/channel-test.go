@@ -185,6 +185,7 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 		constant.ChannelTypeDoubaoVideo,
 		constant.ChannelTypeVidu,
 		constant.ChannelTypeTaskPlugin,
+		constant.ChannelTypeHalo,
 	}
 	if lo.Contains(unsupportedTestChannelTypes, channel.Type) ||
 		(channel.Type == constant.ChannelTypeFal && !fal.IsOpenRouterEndpoint(channel.GetBaseURL())) {

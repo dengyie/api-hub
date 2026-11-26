@@ -19,6 +19,7 @@ import (
 	"github.com/dengyie/apihub/relay/channel/advancedcustom"
 	"github.com/dengyie/apihub/relay/channel/fal"
 	"github.com/dengyie/apihub/relay/channel/gemini"
+	"github.com/dengyie/apihub/relay/channel/halo"
 	"github.com/dengyie/apihub/relay/channel/ollama"
 	relaycommon "github.com/dengyie/apihub/relay/common"
 	relayconstant "github.com/dengyie/apihub/relay/constant"
@@ -392,6 +393,9 @@ func fetchChannelUpstreamModelIDs(channel *model.Channel) ([]string, error) {
 	}
 	if channel.Type == constant.ChannelTypeFal {
 		return normalizeModelNames(fal.ModelList), nil
+	}
+	if channel.Type == constant.ChannelTypeHalo {
+		return normalizeModelNames(halo.ModelList), nil
 	}
 	baseURL := constant.GetChannelBaseURL(channel.Type)
 	if channel.GetBaseURL() != "" {

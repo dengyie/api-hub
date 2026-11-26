@@ -35,6 +35,8 @@ export const CHANNEL_TYPE_SGLANG = 63
 
 export const CHANNEL_TYPE_FAL = 66
 
+export const CHANNEL_TYPE_HALO = 67
+
 export const CHANNEL_TYPES = {
   0: 'Unknown',
   1: 'OpenAI',
@@ -99,6 +101,7 @@ export const CHANNEL_TYPES = {
   64: 'Bivia',
   65: 'Jev',
   66: 'Fal',
+  67: 'Halo',
 } as const
 
 export type ChannelProviderPresentation = {
@@ -193,6 +196,9 @@ export const CHANNEL_PROVIDER_PRESENTATION: Partial<
   66: {
     descriptionKey: 'Connect to Fal.ai async video generation models',
   },
+  67: {
+    descriptionKey: 'Connect to halo.video native conversation-based video generation',
+  },
 } satisfies Record<
   Exclude<keyof typeof CHANNEL_TYPES, 0 | typeof CHANNEL_TYPE_TASK_PLUGIN>,
   ChannelProviderPresentation
@@ -201,7 +207,7 @@ export const CHANNEL_PROVIDER_PRESENTATION: Partial<
 const CHANNEL_TYPE_DISPLAY_ORDER: number[] = [
   1, 14, 24, 33, 43, 3, 41, 17, 45, 25, 26, 23, 48, 60, 58, 59, 61, 42, 34, 20,
   4, 62, 40, 27, 15, 46, 18, 31, 35, 49, 19, 47, 37, 38, 39, 11, 8, 57, 22, 21,
-  44, 2, 5, 36, 50, 51, 52, 53, 54, 55, 56, 64, 65, 66,
+  44, 2, 5, 36, 50, 51, 52, 53, 54, 55, 56, 64, 65, 66, 67,
 ]
 
 export const CHANNEL_TYPE_OPTIONS: { value: number; label: string }[] = (() => {
@@ -599,6 +605,7 @@ export const TYPE_TO_KEY_PROMPT: Record<number, string> = {
   64: 'Enter Articul8 Bivia API key (ory_at_…)',
   65: 'Enter System One gateway API key, or EMPTY for open endpoints',
   66: 'Enter Fal.ai API key (Key ...)',
+  67: 'Enter halo.video API key (vgn_ ...)',
 }
 
 export const CHANNEL_TYPE_WARNINGS: Record<number, string> = {
@@ -620,4 +627,13 @@ export const FAL_MODELS = [
   'fal-ai/veo3.1/image-to-video',
   'blackforestlabs/flux-3-max/text-to-video',
   'blackforestlabs/flux-3-max/image-to-video',
+]
+
+export const HALO_MODELS = [
+  'halo-video',
+  'halo-video-i2v',
+  'halo-video-fl2v',
+  'halo-video-ref2v',
+  'halo-video-edit',
+  'halo-image',
 ]
