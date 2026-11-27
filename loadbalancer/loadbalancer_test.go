@@ -1168,6 +1168,7 @@ func TestIsUpstreamModelUnavailableError(t *testing.T) {
 		{StatusCode: 400, Err: errors.New("model_not_found: unknown model")},
 		{StatusCode: 404, Err: errors.New("no such model: deepseek-v4-flash")},
 		{StatusCode: 400, Err: errors.New("model is disabled on this gateway: deepseek/deepseek-v4.1-flash")},
+		{StatusCode: 400, Err: errors.New("Модель glm-5.3-flash сейчас недоступна. Открой список моделей и выбери другую.")},
 		{StatusCode: 400, Err: errors.New("failed to get access token: oauth2: cannot fetch token: 400 Bad Request")},
 	}
 	for i, err := range deterministic {

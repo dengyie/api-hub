@@ -227,19 +227,26 @@ func TestGatewayModelDisabledNeverAutoDisables(t *testing.T) {
 	const channelID = 9208
 	defer loadbalancer.ResetCorroborationForChannel(channelID)
 
-	gatewayDisabledErr := types.NewErrorWithStatusCode(
-		stdErrors.New("model is disabled on this gateway: deepseek/deepseek-v4.1-flash"),
-		types.ErrorCodeBadResponseStatusCode,
-		http.StatusBadRequest)
-
-	require.True(t, loadbalancer.IsUpstreamGatewayModelDisabled(gatewayDisabledErr),
-		"前置条件：该措辞被识别为网关侧模型禁用")
-
-	for i := 0; i < 20; i++ {
-		assert.False(t, ShouldDisableChannelCorroborated(channelID, "deepseek-v4.1-flash", gatewayDisabledErr),
-			"网关侧模型禁用不得触发自动禁用整渠道")
+	// 第二条为渠道 #425 生产实测（2026-11-28）：上游俄语「模型暂不可用」的 400。
+	messages := []string{
+		"model is disabled on this gateway: deepseek/deepseek-v4.1-flash",
+		"Модель glm-5.3-flash сейчас недоступна. Открой список моделей и выбери другую.",
 	}
-	assert.False(t, classifyAutoDisable(channelID, gatewayDisabledErr).Disable)
+	for _, message := range messages {
+		gatewayDisabledErr := types.NewErrorWithStatusCode(
+			stdErrors.New(message),
+			types.ErrorCodeBadResponseStatusCode,
+			http.StatusBadRequest)
+
+		require.True(t, loadbalancer.IsUpstreamGatewayModelDisabled(gatewayDisabledErr),
+			"前置条件：该措辞被识别为网关侧模型禁用: %s", message)
+
+		for range 20 {
+			assert.False(t, ShouldDisableChannelCorroborated(channelID, "deepseek-v4.1-flash", gatewayDisabledErr),
+				"网关侧模型禁用不得触发自动禁用整渠道: %s", message)
+		}
+		assert.False(t, classifyAutoDisable(channelID, gatewayDisabledErr).Disable, message)
+	}
 }
 
 // TestSubscriptionInvalidAutoDisables 钉住 2026-11-16 深修（渠道 #365 火山方舟
