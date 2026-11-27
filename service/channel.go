@@ -270,7 +270,7 @@ func classifyAutoDisable(channelId int, err *types.NewAPIError) autoDisableVerdi
 	// InvalidSubscription，2026-11-15 渠道 #365 生产故障）必须人工换 key/
 	// 续订才恢复。它不会自愈，留在池子里等于每个请求白烧一轮换渠道重试。
 	// 注意它不能依赖下方状态码判据兜底：上游回的是 400，而自动禁用状态码表
-	// （401/403/404）天然覆盖不到——2026-11-15 根修（2cf92c0fb）只补了熔断
+	// （默认仅 401，见 status_code_ranges.go）天然覆盖不到——2026-11-15 根修（2cf92c0fb）只补了熔断
 	// 分类器，这里四条判据全漏，渠道全天 821 次 400 在「熔断→自愈→回池→
 	// 再 400」里打转。分类器复用 loadbalancer.IsUpstreamSubscriptionInvalidError
 	// 单一实现（熔断侧同源），措辞漂移只改一处。
@@ -294,7 +294,7 @@ func classifyAutoDisable(channelId int, err *types.NewAPIError) autoDisableVerdi
 	}
 
 	lowerMessage := strings.ToLower(err.Error())
-	search, _ := AcSearch(lowerMessage, operation_setting.AutomaticDisableKeywords, true)
+	search, _ := AcSearch(lowerMessage, operation_setting.AutomaticDisableKeywords(), true)
 	if search {
 		return autoDisableVerdict{Disable: true, Class: loadbalancer.CorroborationClassKeyword}
 	}

@@ -1,11 +1,14 @@
 package operation_setting
 
-import "strings"
+import (
+	"strings"
+	"sync/atomic"
+)
 
 var DemoSiteEnabled = false
 var SelfUseModeEnabled = false
 
-var AutomaticDisableKeywords = []string{
+var defaultAutomaticDisableKeywords = []string{
 	"Your credit balance is too low",
 	"This organization has been disabled.",
 	"You exceeded your current quota",
@@ -23,7 +26,10 @@ var AutomaticDisableKeywords = []string{
 	"quota_exceeded",
 	"user_quota_exhausted",
 	"无权访问",
-	"当前分组",
+	// 刻意不收裸词「当前分组」（2026-11-28 删除）：上游 new-api 的分组报文几乎都是临时
+	// 状态——「上游负载已饱和」「正在维护」「本时段不可调用」「下对于模型 X 无可用渠道」，
+	// 渠道 #436 就因「当前分组正在维护」被不可逆禁用。分组无权访问已由「无权访问」与
+	// user_group_no_permission 覆盖。
 	"not supported by tokenplan",
 	"is not supported by tokenplan",
 	"user_group_no_permission",
@@ -58,18 +64,36 @@ var AutomaticDisableKeywords = []string{
 	//（后者是模型级，渠道本身还服务其它模型）、"bad response status code"（语义不唯一）。
 }
 
+// automaticDisableKeywords 是自动禁用词表的不可变快照。
+//
+// 管理员保存选项 / 选项定时重载会调用 AutomaticDisableKeywordsFromString，而每次
+// 上游失败都会在请求热路径读词表；原先直接重置再逐条 append 同一个全局切片，
+// 并发读会看到空表或半截表（-race 报 DATA RACE，重载期间可漏判死 key）。改为
+// 写侧构造新切片后整体原子替换，读侧拿到的永远是完整的一版，与
+// status_code_ranges.go 的 statusCodeRulesPtr 同一模式。快照切片构造后不得再修改。
+var automaticDisableKeywords atomic.Pointer[[]string]
+
+func init() {
+	keywords := defaultAutomaticDisableKeywords
+	automaticDisableKeywords.Store(&keywords)
+}
+
+// AutomaticDisableKeywords 返回当前词表快照，调用方只读不改。
+func AutomaticDisableKeywords() []string {
+	return *automaticDisableKeywords.Load()
+}
+
 func AutomaticDisableKeywordsToString() string {
-	return strings.Join(AutomaticDisableKeywords, "\n")
+	return strings.Join(AutomaticDisableKeywords(), "\n")
 }
 
 func AutomaticDisableKeywordsFromString(s string) {
-	AutomaticDisableKeywords = []string{}
-	ak := strings.SplitSeq(s, "\n")
-	for k := range ak {
-		k = strings.TrimSpace(k)
-		k = strings.ToLower(k)
+	keywords := []string{}
+	for k := range strings.SplitSeq(s, "\n") {
+		k = strings.ToLower(strings.TrimSpace(k))
 		if k != "" {
-			AutomaticDisableKeywords = append(AutomaticDisableKeywords, k)
+			keywords = append(keywords, k)
 		}
 	}
+	automaticDisableKeywords.Store(&keywords)
 }

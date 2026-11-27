@@ -37,12 +37,19 @@ var selfHealingPhrases = []struct {
 	// 账号级失效。但它既可能是账号超额、也可能是单请求 max_tokens 超限，
 	// 两种含义的后果完全相反。宁可漏判（多烧几轮重试）也不误杀健康渠道。
 	{"quota exceeded", "既可能是账号超额也可能是单请求超限，语义不唯一"},
+	// 以下 4 条为 2026-11-28 生产实测：曾被裸词「当前分组」命中。前 3 条全是
+	// 上游分组的临时状态，渠道 #436 就因「正在维护」被不可逆禁用；负载饱和
+	// 一个窗口内出现 154 次。
+	{"当前分组上游负载已饱和，请稍后再试", "上游分组负载饱和，容量类瞬时故障"},
+	{"当前分组正在维护，请稍后再试。", "上游分组维护，维护结束自愈"},
+	{"当前分组本时段不可调用，可调用时段为：09:00~18:00", "分时段限制，到点自愈"},
+	{"当前分组 GLM分组 下对于模型 gpt-6.1-sol 无可用渠道", "上游路由池状态，模型级而非凭据级"},
 }
 
 func TestAutomaticDisableKeywordsExcludeSelfHealingPhrases(t *testing.T) {
 	for _, tc := range selfHealingPhrases {
 		t.Run(tc.phrase, func(t *testing.T) {
-			hit, words := AcSearch(strings.ToLower(tc.phrase), operation_setting.AutomaticDisableKeywords, true)
+			hit, words := AcSearch(strings.ToLower(tc.phrase), operation_setting.AutomaticDisableKeywords(), true)
 			assert.False(t, hit,
 				"「%s」必须留在自动禁用词表之外（%s）。把它收进来就等于把一次会自愈的故障变成不可逆的整渠道下线。命中词：%v",
 				tc.phrase, tc.why, words)
@@ -58,7 +65,7 @@ func TestAutomaticDisableKeywordsExcludeSelfHealingPhrases(t *testing.T) {
 func TestSelfHealingPhrasesAreNotShadowedByShorterEntries(t *testing.T) {
 	for _, tc := range selfHealingPhrases {
 		lower := strings.ToLower(tc.phrase)
-		for _, kw := range operation_setting.AutomaticDisableKeywords {
+		for _, kw := range operation_setting.AutomaticDisableKeywords() {
 			kwLower := strings.ToLower(kw)
 			if kwLower == "" || len(kwLower) >= len(lower) {
 				continue
@@ -74,8 +81,8 @@ func TestSelfHealingPhrasesAreNotShadowedByShorterEntries(t *testing.T) {
 // 重复条目会让 acKey（词表哈希）无谓变化、白白重建自动机，也让 review 时
 // 多出一次「这两条是不是重复了」的判断。
 func TestAutomaticDisableKeywordsHaveNoDuplicates(t *testing.T) {
-	seen := make(map[string]int, len(operation_setting.AutomaticDisableKeywords))
-	for i, kw := range operation_setting.AutomaticDisableKeywords {
+	seen := make(map[string]int, len(operation_setting.AutomaticDisableKeywords()))
+	for i, kw := range operation_setting.AutomaticDisableKeywords() {
 		lower := strings.ToLower(kw)
 		require.NotEmpty(t, lower, "第 %d 条词表条目为空", i)
 		if prev, dup := seen[lower]; dup {
@@ -89,7 +96,7 @@ func TestAutomaticDisableKeywordsHaveNoDuplicates(t *testing.T) {
 // 悄悄失配：线上报文不会带同样的空白，于是这条词形同虚设，而它在词表里
 // 看起来完全正常。
 func TestAutomaticDisableKeywordsNoLeadingOrTrailingSpace(t *testing.T) {
-	for i, kw := range operation_setting.AutomaticDisableKeywords {
+	for i, kw := range operation_setting.AutomaticDisableKeywords() {
 		assert.Equal(t, strings.TrimSpace(kw), kw,
 			"第 %d 条词表条目 %q 带首尾空白，线上报文不会带，会导致永远匹配不上", i, kw)
 	}
@@ -111,7 +118,7 @@ func TestAutomaticDisableKeywordsStillMatchRealMessages(t *testing.T) {
 	}
 	for _, msg := range mustMatch {
 		t.Run(msg, func(t *testing.T) {
-			hit, words := AcSearch(strings.ToLower(msg), operation_setting.AutomaticDisableKeywords, true)
+			hit, words := AcSearch(strings.ToLower(msg), operation_setting.AutomaticDisableKeywords(), true)
 			assert.True(t, hit,
 				"%q 是生产实测出现过、且必须人工才能恢复的措辞，不得从词表中消失（命中词：%v）", msg, words)
 		})
@@ -135,8 +142,8 @@ func TestNearMissKeywordPairsStayDistinct(t *testing.T) {
 	}
 	for _, pair := range pairs {
 		a, b := pair[0], pair[1]
-		hitA, wordsA := AcSearch(strings.ToLower(a), operation_setting.AutomaticDisableKeywords, true)
-		hitB, wordsB := AcSearch(strings.ToLower(b), operation_setting.AutomaticDisableKeywords, true)
+		hitA, wordsA := AcSearch(strings.ToLower(a), operation_setting.AutomaticDisableKeywords(), true)
+		hitB, wordsB := AcSearch(strings.ToLower(b), operation_setting.AutomaticDisableKeywords(), true)
 		assert.True(t, hitA, "%q 必须在词表里（命中词：%v）", a, wordsA)
 		assert.True(t, hitB, "%q 必须在词表里（与 %q 只差一两个词，子串互相覆盖不到，命中词：%v）", b, a, wordsB)
 	}
