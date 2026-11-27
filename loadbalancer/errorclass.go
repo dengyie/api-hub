@@ -539,11 +539,8 @@ func IsUpstreamRelayError(err *types.NewAPIError) bool {
 		strings.Contains(msg, "当前分组无可用渠道") ||
 		strings.Contains(msg, "暂不可用") ||
 		strings.Contains(msg, "暂时不可用") ||
-		strings.Contains(msg, "disabled on this gateway") ||
-		strings.Contains(msg, "model is disabled") ||
-		strings.Contains(msg, "model_is_disabled") ||
-		strings.Contains(msg, "model is not available") ||
-		strings.Contains(msg, "model not available") ||
+		// 网关侧模型禁用/暂不可用措辞只在 IsUpstreamGatewayModelDisabled 维护一份
+		IsUpstreamGatewayModelDisabled(err) ||
 		strings.Contains(msg, "model is not supported") ||
 		strings.Contains(msg, "model not supported") ||
 		strings.Contains(msg, "channel is not available") ||
@@ -889,30 +886,30 @@ func IsUpstreamModelUnavailableError(err *types.NewAPIError) bool {
 	if err == nil {
 		return false
 	}
+	// 网关侧临时不可用是本判据的子集（同样换渠道重试 + 按模型熔断），措辞只在
+	// IsUpstreamGatewayModelDisabled 维护一份，避免两份关键词表漂移。
+	if IsUpstreamGatewayModelDisabled(err) {
+		return true
+	}
 	msg := strings.ToLower(err.Error())
-	if strings.Contains(msg, "模型不存在") ||
+	return strings.Contains(msg, "模型不存在") ||
 		strings.Contains(msg, "模型不可用") ||
 		strings.Contains(msg, "model not found") ||
 		strings.Contains(msg, "model_not_found") ||
 		strings.Contains(msg, "unknown model") ||
 		strings.Contains(msg, "no such model") ||
-		strings.Contains(msg, "disabled on this gateway") ||
-		strings.Contains(msg, "model is disabled") ||
-		strings.Contains(msg, "model_is_disabled") ||
-		strings.Contains(msg, "model is not available") ||
-		strings.Contains(msg, "model not available") ||
-		isRussianModelUnavailable(msg) ||
 		// "The model `x` does not exist" 这类措辞只有和 model 同时出现才算数：
 		// 单独的 "does not exist" 会把 "session does not exist" 之类的无关 404 一起误伤。
 		(strings.Contains(msg, "does not exist") && strings.Contains(msg, "model")) ||
-		strings.Contains(msg, "cannot fetch token") {
-		return true
-	}
-	return false
+		strings.Contains(msg, "cannot fetch token")
 }
 
 // IsUpstreamGatewayModelDisabled 判定上游中继网关报告的模型被禁用/暂不可用（如 "disabled on this gateway"）。
 // 这属于网关侧策略或临时路由状态，触发重试与按模型熔断冷却，但不得触发不可逆的自动禁用。
+//
+// 俄语措辞来自渠道 #425（2026-11-28 生产实测）：glm-5.3-flash 返回
+// 400「Модель glm-5.3-flash сейчас недоступна」，一天数十次；400 不在默认重试状态码内，
+// 未识别时直接回给客户端。要求同时出现「модель」，避免误伤其它「недоступн*」措辞。
 func IsUpstreamGatewayModelDisabled(err *types.NewAPIError) bool {
 	if err == nil {
 		return false
@@ -923,17 +920,8 @@ func IsUpstreamGatewayModelDisabled(err *types.NewAPIError) bool {
 		strings.Contains(msg, "model_is_disabled") ||
 		strings.Contains(msg, "model is not available") ||
 		strings.Contains(msg, "model not available") ||
-		isRussianModelUnavailable(msg)
-}
-
-// isRussianModelUnavailable 识别俄语上游的「模型暂不可用」措辞（入参须已 ToLower）。
-// 渠道 #425（2026-11-28 生产实测）对 glm-5.3-flash 返回
-// 400「Модель glm-5.3-flash сейчас недоступна」，一天数十次；400 不在默认重试
-// 状态码内，命中即直接回给客户端。归入网关侧临时不可用：换渠道重试 + 按模型熔断，
-// 不自动禁用。要求同时出现「модель」，避免把其它「недоступн*」措辞一起误伤。
-func isRussianModelUnavailable(msg string) bool {
-	return strings.Contains(msg, "модель") &&
-		(strings.Contains(msg, "недоступна") || strings.Contains(msg, "недоступен"))
+		(strings.Contains(msg, "модель") &&
+			(strings.Contains(msg, "недоступна") || strings.Contains(msg, "недоступен")))
 }
 
 // IsRoutingExhaustedError 判断「选不出渠道」这一类**路由池状态**，而不是
@@ -1113,8 +1101,8 @@ var (
 
 // resetCityTZ 错误文案里出现过的城市名 → IANA 时区。新上游出现新城市时在此登记。
 var resetCityTZ = map[string]*time.Location{
-	"moscow":  mustLoc("Europe/Moscow"),
-	"utc":     time.UTC,
+	"moscow":   mustLoc("Europe/Moscow"),
+	"utc":      time.UTC,
 	"shanghai": shanghaiLoc(),
 }
 

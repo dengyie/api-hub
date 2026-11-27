@@ -337,7 +337,7 @@ func DecideRelayRetry(c *gin.Context, err *types.NewAPIError, retryTimes int) Po
 		return PolicyDecision{Action: "retry", Reason: "max_completion_tokens_clamped", Source: "loadbalancer"}
 	}
 	// 以下三类必须**先于** alwaysSkipCodes / 状态码区间闸门判定（即位于
-	// 下面第 328 行那两道闸门之前）。
+	// 下方 IsAlwaysSkipRetryCode 那两道闸门之前）。
 	//
 	// 理由与上面那条完全相同：它们覆盖的上游错误落在 `bad_response_body` /
 	// `bad_response_status_code` 这几个错误码上 —— 前者在
