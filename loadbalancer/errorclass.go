@@ -692,6 +692,28 @@ func IsUpstreamRateLimitError(err *types.NewAPIError) bool {
 	return hasExplicitRateLimitSignal(err)
 }
 
+// IsUpstreamMaxTokensTooLarge 判断上游 400 是否只说「max_tokens 超出该渠道上限」
+// 却不给具体数值（数值型报文由 ParseMaxCompletionTokensLimit 解析并钳制）。
+//
+// 生产实测渠道 #425：「Слишком большой max_tokens для этой модели. Уменьши
+// значение и повтори.」近 3h 让 7 个 glm-5.3-flash 请求直接 400 给客户端，而
+// 同模型其他渠道接受同样的 max_tokens。上限是渠道自己的，换渠道即可。
+func IsUpstreamMaxTokensTooLarge(err *types.NewAPIError) bool {
+	if err == nil || err.StatusCode != http.StatusBadRequest {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "max_tokens") && !strings.Contains(msg, "max_completion_tokens") && !strings.Contains(msg, "max_output_tokens") {
+		return false
+	}
+	for _, phrase := range []string{"too large", "too big", "exceed", "слишком больш"} {
+		if strings.Contains(msg, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
 // IsCodexValidationBadRequest 判断是否为 Codex / Responses 接口由于请求参数格式、缺失必要字段或特定后端协议校验返回的 400 Bad Request（如 "invalid codex request"、code="invalid_responses_request"）。
 // 这属于请求体校验或单后端协议匹配问题，绝非中继代理网关故障，不得触发整渠道熔断。
 func IsCodexValidationBadRequest(err *types.NewAPIError) bool {

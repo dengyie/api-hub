@@ -549,6 +549,22 @@ func TestEvaluateRelayFailure(t *testing.T) {
 		assert.Equal(t, uint(262144), decision.LearnedLimit)
 	})
 
+	t.Run("max tokens too large without limit retries on another channel", func(t *testing.T) {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		err := types.NewOpenAIError(errors.New("Слишком большой max_tokens для этой модели. Уменьши значение и повтори."), types.ErrorCodeBadResponseBody, http.StatusBadRequest)
+		decision := EvaluateRelayFailure(c, err, 2)
+		assert.Equal(t, "retry", decision.PolicyDecision.Action)
+		assert.Equal(t, "max_tokens_too_large", decision.PolicyDecision.Reason)
+		assert.Equal(t, BreakerNone, decision.BreakerEffect, "渠道级参数上限不是渠道故障")
+		assert.Zero(t, decision.LearnedLimit)
+	})
+
+	t.Run("unrelated 400 is still not retried", func(t *testing.T) {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		err := types.NewOpenAIError(errors.New("messages: field required"), types.ErrorCodeBadResponseBody, http.StatusBadRequest)
+		assert.Equal(t, "stop", EvaluateRelayFailure(c, err, 2).PolicyDecision.Action)
+	})
+
 	t.Run("reasoning hydration error flags StripResponsesReasoning", func(t *testing.T) {
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
 		err := types.NewOpenAIError(errors.New("reasoning hydration failed: Encrypted content could not be decrypted"), types.ErrorCodeBadResponseStatusCode, http.StatusBadRequest)

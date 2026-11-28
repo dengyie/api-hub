@@ -336,6 +336,10 @@ func DecideRelayRetry(c *gin.Context, err *types.NewAPIError, retryTimes int) Po
 	if _, ok := loadbalancer.ParseMaxCompletionTokensLimit(err); ok {
 		return PolicyDecision{Action: "retry", Reason: "max_completion_tokens_clamped", Source: "loadbalancer"}
 	}
+	// 同上，但报文不带上限数值、无从钳制：上限属于该渠道，换渠道重试。
+	if loadbalancer.IsUpstreamMaxTokensTooLarge(err) {
+		return PolicyDecision{Action: "retry", Reason: "max_tokens_too_large", Source: "loadbalancer"}
+	}
 	// 以下三类必须**先于** alwaysSkipCodes / 状态码区间闸门判定（即位于
 	// 下方 IsAlwaysSkipRetryCode 那两道闸门之前）。
 	//
