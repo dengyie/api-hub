@@ -1095,14 +1095,14 @@ func TestFirstTokenDeadline_PerAttemptWithinSafetyWindow(t *testing.T) {
 
 	c, _, info := setupStreamTest(t, strings.NewReader(""))
 	info.ChannelMeta.ChannelId = 9
-	// 前面的尝试已用掉 60s：新一轮尝试的首字窗口按本次尝试计时，截止在死线前预留的 20s。
-	info.StartTime = time.Now().Add(-60 * time.Second)
+	// 前面的尝试已用掉 30s：新一轮尝试的首字窗口按本次尝试计时，截止在死线前预留的 50s。
+	info.StartTime = time.Now().Add(-30 * time.Second)
 	attempt := loadbalancer.GlobalTracker().Begin(9, "m")
 	defer attempt.EndCancelled()
 	c.Set(loadbalancer.ContextKeyAttempt, attempt)
 
 	deadline := FirstTokenDeadline(c, info)
-	assert.WithinDuration(t, info.StartTime.Add(85*time.Second), deadline, time.Second)
+	assert.WithinDuration(t, info.StartTime.Add(55*time.Second), deadline, time.Second)
 
 	// 最后一次尝试用满到安全死线。
 	info.RetryIndex = common.RetryTimes()

@@ -72,6 +72,11 @@ type Policy struct {
 	// 截断流式零字节等待总预算。指针三态：缺省 DefaultClientSafetyDeadlineMs；显式 0 = 关闭。
 	ClientSafetyDeadlineMs *int `yaml:"client_safety_deadline_ms"`
 
+	// RetryReserveMs 还能换渠道重试时，从客户端安全死线里为后续尝试预留的时间（毫秒）。
+	// 指针三态：缺省 DefaultRetryReserveMs；不大于 MinRetryWindow 时按 2×MinRetryWindow
+	// 处理（预留必须严格大于重试闸门窗口，否则形同虚设）。
+	RetryReserveMs *int `yaml:"retry_reserve_ms"`
+
 	// EmptyStreamTripThreshold 同一渠道连续空流达到此次数后熔断。
 	// 指针三态：缺省 DefaultEmptyStreamTripThreshold；显式 0 = 关闭。
 	EmptyStreamTripThreshold *int `yaml:"empty_stream_trip_threshold"`
@@ -123,22 +128,40 @@ func (p *Policy) ClientSafetyDeadline() time.Duration {
 // MinRetryWindow 下一次换渠道尝试至少要留出的时间；剩余不足时不再重试。
 const MinRetryWindow = 10 * time.Second
 
-// retryReserve 还能重试时，从客户端安全死线里为下一次尝试预留的时间。
+// DefaultRetryReserveMs 默认为后续换渠道尝试预留的时间（毫秒）。
+//
+// 105s 安全死线下首轮等 55s、换上的渠道还有约 50s。曾为 20s（首轮 85s）：
+// 2026-11-29 生产实测 glm-5.3-flash 一万四千余次成功流式的首字分布为
+// ≤20s 72%、≤40s 88.6%、≤60s 94.2%，与 prompt 体积弱相关（>120k token 也有
+// 84% 在 40s 内）——慢首字主要是渠道卡住，不是请求本身慢。首轮卡死后只剩 20s，
+// 第二个渠道出首字的概率只有 ~72%，实测首轮 TTFT 超时后 312 次救回、255 次
+// 整请求失败（客户端看到的「空回断流」）。改为约对半分后两轮各有 ~92%，代价是
+// 首字落在 55~85s 的约 5% 正常慢请求会被提前换渠道。
+const DefaultRetryReserveMs = 50000
+
+// RetryReserve 返回生效的重试预留时间，恒严格大于 MinRetryWindow。
 //
 // 必须严格大于 MinRetryWindow：controller 的预算闸门要求「此刻 + MinRetryWindow」
 // 早于死线，首字定时器触发后再走到闸门已过去若干毫秒，只预留 MinRetryWindow
-// 的话闸门恒不通过，预留形同虚设。取两倍：线上单次成功流式的首字 95% 在 20s
-// 内，换上的渠道扣掉选路与建连开销后仍大概率来得及出首字。
-const retryReserve = 2 * MinRetryWindow
+// 的话闸门恒不通过，预留形同虚设。
+func (p *Policy) RetryReserve() time.Duration {
+	reserve := time.Duration(DefaultRetryReserveMs) * time.Millisecond
+	if p != nil && p.RetryReserveMs != nil {
+		reserve = time.Duration(*p.RetryReserveMs) * time.Millisecond
+	}
+	if reserve <= MinRetryWindow {
+		return 2 * MinRetryWindow
+	}
+	return reserve
+}
 
 // AttemptFirstTokenDeadline 返回一次流式尝试等待首字（含响应头）的截止时刻；
 // 零值表示不设截止。
 //
 // 首字窗口从本次尝试开始计时，前面失败的尝试不占用它。客户端安全死线是整次
-// 请求共享的上限：还能重试时，本次截止在死线前 retryReserve，保证慢渠道超时
-// 后仍有一次换渠道机会，同时把等待尽量留给慢而正常的上游（线上 ttft 100s 对
-// 105s 死线：首轮可等 85s，单次成功里首字晚于 85s 的约 0.2%）。预留之后本次
-// 剩不到 MinRetryWindow 时，本次就是最后机会，用满到死线。
+// 请求共享的上限：还能重试时，本次截止在死线前 RetryReserve，保证慢渠道超时
+// 后换上的渠道仍有足够的首字窗口（默认值的取舍见 DefaultRetryReserveMs）。
+// 预留之后本次剩不到 MinRetryWindow 时，本次就是最后机会，用满到死线。
 func (p *Policy) AttemptFirstTokenDeadline(channelID int, requestStart, attemptStart time.Time, canRetry bool) time.Time {
 	ttft := p.Resolve(channelID).TTFTTimeoutMs
 	if ttft <= 0 {
@@ -150,7 +173,7 @@ func (p *Policy) AttemptFirstTokenDeadline(channelID int, requestStart, attemptS
 		return deadline
 	}
 	ceiling := requestStart.Add(safety)
-	if reserved := ceiling.Add(-retryReserve); canRetry && reserved.Sub(attemptStart) >= MinRetryWindow {
+	if reserved := ceiling.Add(-p.RetryReserve()); canRetry && reserved.Sub(attemptStart) >= MinRetryWindow {
 		ceiling = reserved
 	}
 	if deadline.After(ceiling) {

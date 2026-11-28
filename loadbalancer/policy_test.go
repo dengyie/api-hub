@@ -78,7 +78,7 @@ func TestChannelPolicyResolveHeaderTimeout(t *testing.T) {
 }
 
 func TestPolicyAttemptFirstTokenDeadline(t *testing.T) {
-	// 线上配置：ttft 100s、客户端安全死线 105s。
+	// 线上配置：ttft 100s、客户端安全死线 105s，重试预留走默认 50s。
 	safety := 105000
 	policy := Policy{
 		Enabled:                true,
@@ -89,24 +89,32 @@ func TestPolicyAttemptFirstTokenDeadline(t *testing.T) {
 	reqStart := time.Unix(1_000_000, 0)
 	at := func(d time.Duration) time.Time { return reqStart.Add(d) }
 
-	// 还能重试时，本次截止在安全死线前 retryReserve：慢而正常的渠道（线上首字 60s 级）
-	// 首轮就能等到，不被提前掐断换渠道。
-	assert.Equal(t, at(85*time.Second), policy.AttemptFirstTokenDeadline(1, reqStart, reqStart, true))
-	assert.True(t, policy.AttemptFirstTokenDeadline(1, reqStart, reqStart, true).After(at(60*time.Second)))
-	// 后续尝试同样截止在预留点，而不是拿到从请求开始算起只剩几百毫秒的首字窗口。
-	assert.Equal(t, at(85*time.Second), policy.AttemptFirstTokenDeadline(1, reqStart, at(52500*time.Millisecond), true))
-	// 预留后本次恰好还剩 MinRetryWindow：仍按预留截止。
-	assert.Equal(t, at(85*time.Second), policy.AttemptFirstTokenDeadline(1, reqStart, at(75*time.Second), true))
-	// 预留后本次不足 MinRetryWindow：这一次就是最后机会，用满剩余窗口。
-	assert.Equal(t, at(105*time.Second), policy.AttemptFirstTokenDeadline(1, reqStart, at(80*time.Second), true))
-	// 首轮在预留点超时后，controller 的预算闸门必须放行换渠道（预留严格大于 MinRetryWindow）。
+	// 还能重试时，本次截止在安全死线前 RetryReserve：首轮卡死的渠道 55s 就让位，
+	// 换上的渠道还有 ~50s 出首字（生产首字 94% 在 60s 内、72% 在 20s 内）。
+	assert.Equal(t, at(55*time.Second), policy.AttemptFirstTokenDeadline(1, reqStart, reqStart, true))
+	// 首轮在预留点超时后，controller 的预算闸门必须放行换渠道。
 	timedOut := policy.AttemptFirstTokenDeadline(1, reqStart, reqStart, true)
 	assert.True(t, timedOut.Add(MinRetryWindow).Before(at(105*time.Second)))
+	// 预留后本次恰好还剩 MinRetryWindow：仍按预留截止。
+	assert.Equal(t, at(55*time.Second), policy.AttemptFirstTokenDeadline(1, reqStart, at(45*time.Second), true))
+	// 预留后本次不足 MinRetryWindow（首轮超时后换上的第二个渠道）：用满到死线。
+	assert.Equal(t, at(105*time.Second), policy.AttemptFirstTokenDeadline(1, reqStart, at(55*time.Second), true))
 	// 不能再重试：首字窗口只受渠道 TTFT 与安全死线约束。
 	assert.Equal(t, at(100*time.Second), policy.AttemptFirstTokenDeadline(1, reqStart, reqStart, false))
 	assert.Equal(t, at(105*time.Second), policy.AttemptFirstTokenDeadline(1, reqStart, at(40*time.Second), false))
 	// TTFT 从本次尝试开始计时：前面的失败尝试不占用本次的首字预算。
-	assert.Equal(t, at(70*time.Second), policy.AttemptFirstTokenDeadline(7, reqStart, at(40*time.Second), true))
+	assert.Equal(t, at(30*time.Second), policy.AttemptFirstTokenDeadline(7, reqStart, reqStart, true))
+	assert.Equal(t, at(90*time.Second), policy.AttemptFirstTokenDeadline(7, reqStart, at(60*time.Second), false))
+
+	// 显式配置预留 20s：首轮可等 85s（旧行为，留给偏好等慢渠道的部署）。
+	reserve := 20000
+	policy.RetryReserveMs = &reserve
+	assert.Equal(t, at(85*time.Second), policy.AttemptFirstTokenDeadline(1, reqStart, reqStart, true))
+	// 预留不大于 MinRetryWindow 时按 2×MinRetryWindow，保证闸门仍能放行重试。
+	tooSmall := 5000
+	policy.RetryReserveMs = &tooSmall
+	assert.Equal(t, at(85*time.Second), policy.AttemptFirstTokenDeadline(1, reqStart, reqStart, true))
+	policy.RetryReserveMs = nil
 
 	// 关闭安全死线：只剩渠道 TTFT。
 	disabled := 0
